@@ -1049,7 +1049,8 @@ function updateFlight(dt) {
 let cesiumViewer      = null;
 let cesiumLabelsLayer = null;   // for hybrid mode in Cesium
 let photorealTileset  = null;   // Google Photorealistic 3D Tiles (once loaded)
-let osmBuildingsTileset = null; // Cesium OSM Buildings (once loaded)
+let osmBuildingsTileset    = null; // Cesium OSM Buildings (once loaded)
+let satelliteTextureCenter = null; // {lat, lng} where the current tile grid was fetched
 
 /**
  * initCesium — sets up the Cesium viewer with ArcGIS satellite imagery as a
@@ -1623,6 +1624,10 @@ async function applyOsmBuildingsSatelliteTexture(tileset) {
         const GRID = 3;         // 3×3 tile grid → ~450 m coverage, no clamping at tile edges
         const HALF = 1;         // Math.floor(GRID/2)
         const TS   = 256;       // pixels per tile
+
+        // Record where this tile grid is centred so the frame loop can
+        // trigger a refresh when the car strays too far.
+        satelliteTextureCenter = { lat: state.lat, lng: state.lng };
 
         const { x: cx, y: cy } = latLngToOsmTile(state.lat, state.lng, zoom);
         const n = Math.pow(2, zoom);
@@ -2240,6 +2245,16 @@ function update() {
     // ── Render mode: Cesium (first-person — no vehicle sprite to draw) ─────
     if (settings.renderMode === '3D' && cesiumViewer) {
         updateCesiumCamera(dt);
+
+        // Refresh satellite building texture when the car drifts > ~150 m
+        // from where the tile grid was originally fetched.
+        if (osmBuildingsTileset && satelliteTextureCenter) {
+            const dLat = Math.abs(state.lat - satelliteTextureCenter.lat);
+            const dLng = Math.abs(state.lng - satelliteTextureCenter.lng);
+            if (dLat > 0.0014 || dLng > 0.0014) {   // ~150 m in degrees
+                applyOsmBuildingsSatelliteTexture(osmBuildingsTileset);
+            }
+        }
 
     } else {
         // ── Render mode: CSS perspective or 2D ───────────────────────────
