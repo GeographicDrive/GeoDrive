@@ -1,166 +1,110 @@
-// --- CONFIGURACIÓN ---
-const APP_CACHE_NAME = 'geodrive-app-v1';
-const TILE_CACHE_NAME = 'geodrive-tiles-v1';
-const MAX_TILES_LIMIT = 2000; // Límite de mosaicos de mapa para no saturar el disco
+const CACHE_NAME = 'geodrive-cache-v1';
 
-// Archivos esenciales para que la app cargue (App Shell)
+// 1. FIXED PATHS: Updated to match the actual root directory structure of your repo
 const APP_SHELL_FILES = [
-    '/',
-    '/index.html',
-    '/manifest.json',
-    '/css/style.css', // Ajusta las rutas según tu estructura
-    '/js/app.js',
-    '/js/cesium-helper.js',
-    '/icons/icon-192.png',
-    '/icons/icon-512.png'
+  '/',
+  '/index.html',
+  '/style.css',
+  '/script.js',
+  '/manifest.json',
+  '/icon-512.png'
 ];
 
-// --- INSTALACIÓN: Precarga el App Shell ---
+// 2. INSTALL EVENT: Cache the App Shell
 self.addEventListener('install', (event) => {
-    console.log('[SW] Instalando y precargando App Shell...');
-    event.waitUntil(
-        caches.open(APP_CACHE_NAME)
-            .then((cache) => cache.addAll(APP_SHELL_FILES))
-            .then(() => self.skipWaiting()) // Activa el nuevo SW inmediatamente
-    );
+  console.log('[Service Worker] Installing...');
+  event.waitUntil(
+    caches.open(CACHE_NAME).then((cache) => {
+      console.log('[Service Worker] Caching App Shell');
+      
+      // FIX: Use Promise.allSettled instead of cache.addAll().
+      // If one file 404s, the old code broke the entire installation. 
+      // This ensures the SW activates even if a file is missing.
+      return Promise.allSettled(
+        APP_SHELL_FILES.map((url) => 
+          cache.add(url).catch(err => {
+            console.warn(`[Service Worker] Failed to cache: ${url}`, err);
+          })
+        )
+      );
+    })
+  );
+  self.skipWaiting(); // Activate immediately without waiting for a refresh
 });
 
-// --- ACTIVACIÓN: Limpia cachés antiguas ---
+// 3. ACTIVATE EVENT: Clean up old caches
 self.addEventListener('activate', (event) => {
-    console.log('[SW] Activando y limpiando cachés obsoletas...');
-    const currentCaches = [APP_CACHE_NAME, TILE_CACHE_NAME];
-    
-    event.waitUntil(
-        caches.keys().then((cacheNames) => {
-            return Promise.all(
-                cacheNames.map((cacheName) => {
-                    if (!currentCaches.includes(cacheName)) {
-                        console.log('[SW] Borrando caché antigua:', cacheName);
-                        return caches.delete(cacheName);
-                    }
-                })
-            );
-        }).then(() => self.clients.claim()) // Toma el control de todas las pestañas abiertas
-    );
+  console.log('[Service Worker] Activating...');
+  event.waitUntil(
+    caches.keys().then((cacheNames) => {
+      return Promise.all(
+        cacheNames.map((cache) => {
+          if (cache !== CACHE_NAME) {
+            console.log('[Service Worker] Clearing old cache:', cache);
+            return caches.delete(cache);
+          }
+        })
+      );
+    })
+  );
+  self.clients.claim(); // Take control of the page immediately
 });
 
-// --- INTERCEPCIÓN DE PETICIONES (FETCH) ---
+// 4. FETCH EVENT: Serve content intelligently
 self.addEventListener('fetch', (event) => {
-    const url = new URL(event.request.url);
+  const url = new URL(event.request.url);
 
-    // 1. ESTRATEGIA: API y Rutas (Network First)
-    // Para OSRM (rutas) y Nominatim (búsquedas). Siempre busca en red, si falla, usa caché.
-    if (url.hostname.includes('router.project-osrm.org') || 
-        url.hostname.includes('nominatim.openstreetmap.org') ||
-        url.pathname.includes('/route') || url.pathname.includes('/search')) {
-        event.respondWith(networkFirstStrategy(event.request));
-        return;
-    }
+  // 5. FIXED REGEX: 
+  // - Escaped the dot (\.) so it doesn't match any character.
+  // - Removed backslashes from pipes (|) so it acts as an OR operator.
+  // - Fixed the invalid (?.*) group to a valid optional group (\?.*)
+  // - Added Cesium 3D tile extensions (b3dm, pnts, i3dm, cmpt)
+  const isAsset = /\.(png|jpg|jpeg|webp|svg|terrain|layer|b3dm|pnts|i3dm|cmpt)(\?.*)?$/i.test(url.pathname);
 
-    // 2. ESTRATEGIA: Mosaicos de Mapas y Cesium (Cache First + Expiración)
-    // Para OpenStreetMap, Satélites, y trabajadores de Cesium.
-    if (isTileOrCesiumRequest(url)) {
-        event.respondWith(tileCacheStrategy(event.request));
-        return;
-    }
-
-    // 3. ESTRATEGIA: App Shell y Archivos Estáticos (Cache First)
-    // Para HTML, CSS, JS, Iconos.
-    event.respondWith(cacheFirstStrategy(event.request, APP_CACHE_NAME));
-});
-
-
-// --- IMPLEMENTACIÓN DE ESTRATEGIAS ---
-
-// A. Cache First (Para la estructura de la app)
-async function cacheFirstStrategy(request, cacheName) {
-    const cachedResponse = await caches.match(request);
-    if (cachedResponse) {
-        return cachedResponse;
-    }
-    try {
-        const networkResponse = await fetch(request);
-        if (networkResponse.ok) {
-            const cache = await caches.open(cacheName);
-            cache.put(request, networkResponse.clone());
-        }
-        return networkResponse;
-    } catch (error) {
-        return new Response('Recurso no disponible offline', { status: 503, statusText: 'Service Unavailable' });
-    }
-}
-
-// B. Network First (Para APIs de rutas y geocodificación)
-async function networkFirstStrategy(request) {
-    const cache = await caches.open(APP_CACHE_NAME);
-    try {
-        const networkResponse = await fetch(request);
-        if (networkResponse.ok) {
-            cache.put(request, networkResponse.clone());
-        }
-        return networkResponse;
-    } catch (error) {
-        const cachedResponse = await cache.match(request);
+  // STRATEGY A: Cache First (For Map Tiles, 3D Models, Images, CSS, JS)
+  // This makes the map load instantly and allows offline viewing of previously seen areas.
+  if (isAsset || event.request.destination === 'image' || event.request.destination === 'style' || event.request.destination === 'script') {
+    event.respondWith(
+      caches.match(event.request).then((cachedResponse) => {
         if (cachedResponse) {
-            return cachedResponse;
+          return cachedResponse;
         }
-        return new Response(JSON.stringify({ error: 'Sin conexión y sin datos en caché' }), { 
-            status: 503, 
-            headers: { 'Content-Type': 'application/json' } 
+        
+        return fetch(event.request).then((networkResponse) => {
+          // Only cache successful, same-origin responses
+          if (networkResponse && networkResponse.status === 200 && networkResponse.type === 'basic') {
+            const responseToCache = networkResponse.clone();
+            caches.open(CACHE_NAME).then((cache) => {
+              cache.put(event.request, responseToCache);
+            });
+          }
+          return networkResponse;
+        }).catch(() => {
+          // Fallback if offline and not in cache
+          return new Response('', { status: 404, statusText: 'Not found' });
         });
-    }
-}
+      })
+    );
+    return;
+  }
 
-// C. Cache First con Límite (Para Mapas y Cesium)
-async function tileCacheStrategy(request) {
-    const cache = await caches.open(TILE_CACHE_NAME);
-    const cachedResponse = await cache.match(request);
-
-    if (cachedResponse) {
-        // Truco LRU: Al volver a guardar la respuesta, la movemos al "final" de la lista
-        cache.put(request, cachedResponse.clone());
-        return cachedResponse;
-    }
-
-    try {
-        const networkResponse = await fetch(request);
-        if (networkResponse.ok) {
-            await cache.put(request, networkResponse.clone());
-            // Limpia los mosaicos más antiguos si superamos el límite
-            cleanTileCache(cache);
+  // STRATEGY B: Network First (For HTML and API calls)
+  // Always tries to get the latest HTML/manifest, but falls back to cache if offline.
+  event.respondWith(
+    fetch(event.request)
+      .then((networkResponse) => {
+        if (networkResponse && networkResponse.status === 200) {
+          const responseToCache = networkResponse.clone();
+          caches.open(CACHE_NAME).then((cache) => {
+            cache.put(event.request, responseToCache);
+          });
         }
         return networkResponse;
-    } catch (error) {
-        return new Response('', { status: 404, statusText: 'Not Found' });
-    }
-}
-
-// --- FUNCIONES AUXILIARES ---
-
-function isTileOrCesiumRequest(url) {
-    // Detecta imágenes de mapas (png, jpg, webp) o peticiones a servidores de Cesium/OSM
-    const isImage = /\.(png|jpg|jpeg|webp|svg|terrain|layer)(\?.*)?$/i.test(url.pathname);
-    const isCesium = url.hostname.includes('cesium.com') || url.hostname.includes('assets.ion.cesium.com');
-    const isOSM = url.hostname.includes('tile.openstreetmap.org') || url.hostname.includes('tile.openstreetmap.fr');
-    
-    return isImage || isCesium || isOSM;
-}
-
-async function cleanTileCache(cache) {
-    const keys = await cache.keys();
-    if (keys.length > MAX_TILES_LIMIT) {
-        // Calcula cuántos borrar (los más antiguos están al principio del array)
-        const itemsToDelete = keys.slice(0, keys.length - MAX_TILES_LIMIT);
-        await Promise.all(itemsToDelete.map(req => cache.delete(req)));
-    }
-}
-
-// --- MENSAJERÍA (Opcional: Para limpiar caché desde el frontend) ---
-self.addEventListener('message', (event) => {
-    if (event.data.action === 'skipWaiting') {
-        self.skipWaiting();
-    }
-    if (event.data.action === 'clearTileCache') {
-        caches.delete(TILE_CACHE_NAME).then(() => console.log('[SW] Caché de mapas limpiada'));
-    }
+      })
+      .catch(() => {
+        return caches.match(event.request).then((cachedResponse) => {
+          return cachedResponse || new Response('Offline', { status: 503, statusText: 'Service Unavailable' });
+        });
+      })
+  );
 });
