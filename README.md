@@ -246,7 +246,24 @@ GeoDrive/
 - 3D Cesium mode is first-person only; use 3D CSS mode for third-person chase cam  
 - Flight physics are simplified for gameplay, not realistic simulation  
 - Requires internet connection for map tiles (unless cached by service worker)  
-  
+
+
+  🤖 AI-Assisted Development
+
+GeoDrive was developed with the assistance of artificial intelligence tools.
+
+AI was used throughout the project to help with:
+
+- Code generation and prototyping
+- Feature implementation
+- Bug fixing and optimization
+- UI/UX improvements
+- Documentation and project structure
+
+All final design decisions, integration, testing, and project direction were performed by the author.
+
+GeoDrive is an example of human creativity and AI-assisted software development working together.
+
 ## 🙏 Credits  
   
 - **Map tiles**: © [ArcGIS](https://www.arcgis.com/)  
