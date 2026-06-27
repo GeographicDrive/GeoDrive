@@ -12,7 +12,7 @@ const APP_SHELL_FILES = [
   '/style.css',
   '/script.js',
   '/manifest.json',
-  '/icon-512.png'
+  '/icon-513.png'
 ];
 
 // 1. INSTALACIÓN: Guarda la interfaz base
