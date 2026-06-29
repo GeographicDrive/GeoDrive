@@ -105,8 +105,9 @@ select, .btn-ui { background: rgba(255, 255, 255, 0.9); border: none; padding: 8
     flex-wrap: nowrap;
     justify-content: center;
     width: auto;
-    max-width: 45vw;
-    overflow: hidden;
+    max-width: 95vw;
+    overflow-x: auto;
+    overflow-y: hidden;
     transition: padding 0.4s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
