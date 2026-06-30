@@ -1,0 +1,751 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>3D Driving & Flight Simulator</title>
+
+    <link rel="manifest" href="manifest.json">
+
+    <!-- Leaflet (collision, routing, GPS) -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@latest/dist/leaflet-routing-machine.css" />
+
+    <!-- CesiumJS (3D world engine) -->
+    <link href="https://cesium.com/downloads/cesiumjs/releases/1.117/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+
+    <link rel="stylesheet" href="style.css"/>
+    <script src="https://unpkg.com/@turf/turf@6/turf.min.js"></script>
+</head>
+<body>
+
+    <!-- ─── CESIUM 3D WORLD (shown in 3D mode) ───────────────────────────── -->
+    <div id="cesium-container"></div>
+
+    <div id="skybox"></div>
+
+    <!-- ─── LEAFLET CSS-PERSPECTIVE VIEW (shown in 2D mode / fallback) ────── -->
+    <div id="camera-perspective">
+        <div id="camera-tilt">
+            <div id="map-rotator">
+                <div id="map-subpixel">
+                    <div id="map-container">
+                        <div id="map"></div>
+                    </div>
+                </div>
+            </div>
+            <div id="vehicle-overlay">
+                <div id="vehicle-graphic"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Cesium 3D mode owns its own vehicle visuals: in first-person there's
+         nothing to draw (you're inside the vehicle); in third-person, simple
+         box-built vehicle models are added directly to the Cesium scene in
+         script.js. The #vehicle-overlay sprite below is only used by the
+         3D CSS / 2D modes. -->
+
+    <div id="ui-top" class="panel">
+        <div id="ui-top-controls">
+            <select id="vehicle-select">
+                <option value="car">🚗 Car</option>
+                <option value="bus">🚌 Bus</option>
+                <option value="plane">✈️ Plane</option>
+            </select>
+            
+            <select id="map-layer-select">
+                <option value="sat">🛰️ Satellite</option>
+                <option value="hybrid">🗺️ Hybrid</option>
+            </select>
+
+            <button class="btn-ui" onclick="toggleGPS()" style="background: var(--accent); color: white;">📍 GPS</button>
+            <button class="btn-ui" id="btn-orientation" onclick="toggleOrientation()">🧭 North Up</button>
+            <button class="btn-ui" id="btn-cam-view-quick" onclick="toggleCesiumCameraQuick()" style="display:none; background:#8b5cf6; color:white;">👁️ 1st Person</button>
+            <button class="btn-ui" id="btn-cockpit-cam-open" onclick="openCockpitCamModal()" style="display:none; background:#16a34a; color:white;">🎥 Cam</button>
+            <button class="btn-ui" id="btn-day-night" onclick="toggleDayNight()" style="background:#1e293b; color:white;" title="Toggle Day / Night mode">☀️ Day</button>
+            <button class="btn-ui" id="btn-preload-quick" onclick="quickPreloadArea()" title="Preload terrain/tiles around your current position" style="background:#0ea5e9; color:white;">🗺️ Preload</button>
+            <button class="btn-ui" onclick="toggleSettings()" style="background: #475569; color: white;">⚙️ Settings</button>
+            <button class="btn-ui" id="btn-exit-to-spawn" onclick="exitToSpawnSelector()" style="background:#dc2626; color:white;" title="Exit to spawn selection">🚪 Exit</button>
+        </div>
+        
+        <button class="btn-ui" id="btn-minimize" onclick="toggleUiTop()" aria-label="Minimizar panel" style="background: rgba(255, 255, 255, 0.1); border: 1px solid var(--border-panel); color: white; padding: 8px; display: flex; align-items: center; justify-content: center; min-width: 38px;">
+            ➖
+        </button>
+    </div>
+
+    <div id="controls-help">
+        <b id="help-title">Keep Chrome zoom at 67%</b><br>
+        <span id="help-text"><br></span>
+    </div>
+
+    <div id="settings-modal" class="modal-overlay" style="display: none;">
+        <div class="modal-content panel" id="settings-modal-content">
+            <div class="modal-header">
+                <h2>⚙️ Settings</h2>
+                <button class="btn-close" onclick="toggleSettings()">×</button>
+            </div>
+            <div class="modal-body settings-modal-body">
+
+                <div class="settings-tabs" id="settings-tabs">
+                    <button class="settings-tab active" data-tab="display" onclick="switchSettingsTab('display')">🖥️ Display</button>
+                    <button class="settings-tab" data-tab="physics" onclick="switchSettingsTab('physics')">🛡️ Physics</button>
+                    <button class="settings-tab" data-tab="camera" onclick="switchSettingsTab('camera')">🎥 Camera</button>
+                    <button class="settings-tab" data-tab="airplane" id="tab-btn-airplane" onclick="switchSettingsTab('airplane')">✈️ Airplane</button>
+                    <button class="settings-tab" data-tab="scales" onclick="switchSettingsTab('scales')">🔍 Scales</button>
+                    <button class="settings-tab" data-tab="controls" onclick="switchSettingsTab('controls')">🎮 Controls</button>
+                    <button class="settings-tab" data-tab="imagery" onclick="switchSettingsTab('imagery')">🌍 Imagery</button>
+                    <button class="settings-tab" data-tab="preloading" onclick="switchSettingsTab('preloading')">🗺️ Preloading</button>
+                    <button class="settings-tab" data-tab="gp3dt" id="tab-btn-gp3dt" onclick="switchSettingsTab('gp3dt')">🏙️ GP3DT</button>
+                    <button class="settings-tab" data-tab="troubleshoot" onclick="switchSettingsTab('troubleshoot')">🔧 Help</button>
+                </div>
+
+                <div class="settings-panels" id="settings-panels">
+
+                <div class="settings-panel-content active" data-tab="display">
+                <div class="settings-section" style="border-color: #06b6d4; background: rgba(6, 182, 212, 0.1);">
+                    <h3 style="color: #06b6d4;">🖥️ Display</h3>
+                    <label style="align-items: center; cursor: pointer;">
+                        ⛶ Fullscreen
+                        <input type="checkbox" id="set-fullscreen" onchange="toggleFullscreen(this.checked)" style="width: 20px; height: 20px;">
+                    </label>
+                    <p class="desc-text">Hides the browser UI for an immersive view. Exits automatically if you press Esc.</p>
+
+                    <label style="margin-top: 15px;">🌤️ Sky</label>
+                    <select id="set-skybox" class="input-select" onchange="updateSkyBox(this.value)">
+                        <option value="default">Default (Cesium Atmosphere)</option>
+                        <option value="clouds">Custom Skybox — Clouds</option>
+                    </select>
+                    <p class="desc-text">"Clouds" swaps Cesium's procedural sky for a fixed cloud-photo cubemap (skybox.png). Looks great at altitude in 3D Cesium mode; switch back to Default any time.</p>
+
+                    <label style="align-items: center; cursor: pointer; margin-top: 15px;">
+                        🚧 Occlusion Culling (terrain depth test)
+                        <input type="checkbox" id="set-occlusion-culling" checked onchange="toggleOcclusionCulling(this.checked)" style="width: 20px; height: 20px;">
+                    </label>
+                    <p class="desc-text">When on, terrain correctly hides buildings, 3D tiles, and vehicles behind hills/ridges (more realistic, slightly more GPU cost). Turn off only if you're chasing extra performance and don't mind objects showing through terrain.</p>
+
+                    <label style="margin-top: 15px;">🔦 Terrain Brightness at Night: <span id="val-night-brightness">18</span>%</label>
+                    <input type="range" class="slider" id="set-night-brightness" min="0" max="100" step="1" value="18" oninput="updateNightTerrainBrightness(this.value)">
+                    <p class="desc-text">Controls how bright the ground imagery, GP3DT buildings, and the overall night tint look while Night mode (☀️/🌙 button) is active — lower for a true pitch-black night, higher to simulate moonlight or ambient city glow. Has no effect during the day.</p>
+                </div>
+                </div>
+
+                <div class="settings-panel-content" data-tab="physics">
+                <div class="settings-section" style="border-color: #10b981; background: rgba(16, 185, 129, 0.1);">
+                    <h3 style="color: #10b981;">🛡️ Physics & Environment</h3>
+                    <label style="align-items: center; cursor: pointer;">
+                        Vehicle Collision
+                        <input type="checkbox" id="set-collision" onchange="toggleCollision(this.checked)" style="width: 20px; height: 20px;">
+                    </label>
+                    <label style="align-items: center; cursor: pointer; color: #ef4444; margin-top: 10px;">
+                        Show Collision Zones (Red)
+                        <input type="checkbox" id="set-debug-collision" onchange="toggleDebugCollision(this.checked)" style="width: 20px; height: 20px;">
+                    </label>
+                </div>
+                </div>
+
+                <div class="settings-panel-content" data-tab="camera">
+                <div class="settings-section" style="border-color: #8b5cf6; background: rgba(139, 92, 246, 0.1);">
+                    <h3 style="color: #8b5cf6;">🎥 Camera Mode</h3>
+                    <div style="display: flex; gap: 10px; margin-top: 10px;">
+                        <button class="btn-ui active" id="btn-mode-3d" onclick="setRenderMode('3D')" style="flex:1;">3D Cesium</button>
+                        <button class="btn-ui" id="btn-mode-css" onclick="setRenderMode('CSS')" style="flex:1;">3D CSS</button>
+                        <button class="btn-ui" id="btn-mode-2d" onclick="setRenderMode('2D')" style="flex:1;">2D Map</button>
+                    </div>
+                    <p class="desc-text" style="margin-top:8px;">3D Cesium: real globe engine (real terrain/buildings) — choose 1st or 3rd person below. 3D CSS: lightweight perspective, chase cam. 2D: flat top-down.</p>
+
+                    <div style="display: flex; gap: 10px; margin-top: 12px;">
+                        <button class="btn-ui active" id="btn-view-first" onclick="setCesiumCameraView('first')" disabled style="flex:1;">👁️ 1st Person</button>
+                        <button class="btn-ui" id="btn-view-third" onclick="setCesiumCameraView('third')" disabled style="flex:1;">🚙 3rd Person</button>
+                    </div>
+                    <p class="desc-text">Only applies in 3D Cesium mode. 3rd person shows a simple box-built model of the current vehicle with a chase camera behind it.</p>
+
+                    <label style="margin-top: 15px;">3rd Person Zoom: <span id="val-3rd-person-zoom">1.00</span>x</label>
+                    <input type="range" class="slider" id="set-3rd-person-zoom" min="0.3" max="3.0" step="0.05" value="1.0" oninput="updateThirdPersonZoom(this.value)">
+                    <p class="desc-text">Moves the 3rd person chase camera closer (zoom in) or farther (zoom out) from the vehicle. Default: 1.0x.</p>
+
+                    <label style="margin-top: 15px;">Camera Follow Delay: <span id="val-cam-follow-delay">1.00</span>x</label>
+                    <input type="range" class="slider" id="set-cam-follow-delay" min="0.2" max="5.0" step="0.1" value="1.0" oninput="updateCameraFollowDelay(this.value)">
+                    <p class="desc-text">3rd person chase camera position lag (altitude + left/right sweep). Lower = snappier/near-instant; higher = floatier, more inertia. Never affects camera rotation/banking or chase distance. Default: 1.0x.</p>
+
+                    <label style="margin-top: 15px;">
+                        Camera Look Target: <span id="val-cam-horizon-blend">0.00</span>
+                    </label>
+                    <div style="display:flex; justify-content:space-between; font-size:0.72rem; color:var(--text-muted); margin-top:3px;">
+                        <span>🎯 Center on vehicle</span>
+                        <span>🌅 Center on horizon</span>
+                    </div>
+                    <input type="range" class="slider" id="set-cam-horizon-blend" min="0" max="1" step="0.05" value="0" oninput="updateCameraLookBlend(this.value)">
+                    <p class="desc-text">Blends the 3rd person camera's look target between the vehicle (0) and the horizon (1). Higher values give a more cinematic, forward-looking view. Default: 0.</p>
+
+                    <label style="align-items: center; cursor: pointer; margin-top: 15px;">
+                        📷 Camera banks/rolls with plane
+                        <input type="checkbox" id="set-cam-rotate-plane" checked onchange="updateCameraRotatesWithPlane(this.checked)" style="width: 20px; height: 20px;">
+                    </label>
+                    <p class="desc-text">When on, the 3rd person camera's horizon tilts with the aircraft's bank angle. When off, the camera up-vector stays level — the horizon is always flat regardless of how much the plane rolls. Only applies to the plane in 3rd person.</p>
+
+                    <label style="margin-top: 15px;">Camera Tilt (CSS mode): <span id="val-cam-tilt">0</span>°</label>
+                    <input type="range" class="slider" id="set-cam-tilt" min="-90" max="90" step="1" value="0" oninput="updateCameraTilt(this.value)">
+
+                    <label style="margin-top: 15px;">Field of View (Cesium 3D): <span id="val-fov">75</span>°</label>
+                    <input type="range" class="slider" id="set-fov" min="30" max="120" step="1" value="75" oninput="updateFOV(this.value)">
+                    <p class="desc-text">Wider FOV gives a fish-eye runway feel; narrower is more realistic. Default: 75°.</p>
+
+
+                </div>
+                </div>
+
+                <div class="settings-panel-content" data-tab="airplane">
+                <div class="settings-section" style="border-color: #38bdf8; background: rgba(56, 189, 248, 0.08);">
+                    <h3 style="color: #38bdf8;">✈️ Airplane — 3D Mode Controls</h3>
+                    <p class="desc-text">These settings only affect the airplane in 3D Cesium mode. They have no effect on the car or bus.</p>
+
+                    <label style="margin-top: 12px;">Control Sensitivity: <span id="val-flight-sensitivity">1.00x</span></label>
+                    <div style="display:flex; justify-content:space-between; font-size:0.72rem; color:var(--text-muted); margin-top:3px;">
+                        <span>🐢 Sluggish / Stable</span>
+                        <span>⚡ Twitchy / Responsive</span>
+                    </div>
+                    <input type="range" class="slider" id="set-flight-sensitivity" min="0.2" max="3.0" step="0.05" value="1.0" oninput="updateFlightSensitivity(this.value)">
+                    <p class="desc-text">Scales how fast the plane rolls and pitches in response to joystick or keyboard input. Lower = more stable and forgiving; higher = sharper, more aggressive control response. Default: 1.00x.</p>
+
+                    <label style="margin-top: 15px;">Acceleration / Thrust: <span id="val-flight-acceleration">1.00x</span></label>
+                    <div style="display:flex; justify-content:space-between; font-size:0.72rem; color:var(--text-muted); margin-top:3px;">
+                        <span>🐌 Slow build-up</span>
+                        <span>🚀 Instant power</span>
+                    </div>
+                    <input type="range" class="slider" id="set-flight-acceleration" min="0.2" max="3.0" step="0.05" value="1.0" oninput="updateFlightAcceleration(this.value)">
+                    <p class="desc-text">Multiplies the engine's maximum thrust. Higher values mean the plane reaches top speed much faster; lower values give a slow, realistic spool-up. Does not affect drag or stall speed. Default: 1.00x.</p>
+                </div>
+                </div>
+
+                <div class="settings-panel-content" data-tab="scales">
+                <div class="settings-section">
+                    <h3>🔍 Scales</h3>
+                    <label>Vehicle Size: <span id="val-veh-size">1.0</span>x</label>
+                    <input type="range" class="slider" id="set-veh-size" min="0.5" max="5" step="0.1" value="1.0" oninput="updateVehicleScale(this.value)">
+
+                    <label>Map Zoom: <span id="val-map-zoom">18</span></label>
+                    <input type="range" class="slider" id="set-map-zoom" min="12" max="22" step="0.5" value="18" oninput="updateMapZoom(this.value)">
+
+                    <label>Camera Zoom (CSS): <span id="val-cam-zoom">1.0</span>x</label>
+                    <input type="range" class="slider" id="set-cam-zoom" min="0.3" max="3.0" step="0.05" value="1.0" oninput="updateCameraZoom(this.value)">
+                </div>
+                </div>
+
+                <div class="settings-panel-content" data-tab="controls">
+                <div class="settings-section">
+                    <h3>🎮 Steering Control</h3>
+                    <select id="set-steering-mode" class="input-select" onchange="updateSteeringMode(this.value)">
+                        <option value="arrows">D-Pad / Buttons</option>
+                        <option value="joystick">Virtual Joystick</option>
+                    </select>
+
+                    <label style="margin-top: 15px;">Sensitivity: <span id="val-steering-sens">1.0</span>x</label>
+                    <input type="range" class="slider" id="set-steering-sens" min="0.1" max="3.0" step="0.1" value="1.0" oninput="updateSteeringSensitivity(this.value)">
+                </div>
+                </div>
+
+                <!-- API keys (optional – nothing is baked in; paste your own here).
+                     Saved to this browser's localStorage only, never sent anywhere
+                     except directly to Cesium/Google with the request itself. -->
+                <div class="settings-panel-content" data-tab="imagery">
+                <div class="settings-section" style="border-color: #f59e0b; background: rgba(245, 158, 11, 0.08);">
+                    <h3 style="color: #f59e0b;">🌍 3D Imagery Keys (optional)</h3>
+                    <p class="desc-text">Works fine with no keys (flat ArcGIS satellite imagery). Add a free Cesium Ion token below to unlock real terrain elevation, OSM building footprints, AND free photorealistic 3D tiles — no Google Cloud account needed. Keys are saved only in this browser, never shipped with the app.</p>
+
+                    <label style="margin-top: 12px;">3D Map Style <span style="font-weight:400;">— only takes effect once a token below is saved</span></label>
+                    <div style="display: flex; gap: 8px; margin-top: 6px; flex-wrap: wrap;">
+                        <button id="btn-style-cesium" class="btn-ui" onclick="set3DStyle('cesium')" style="flex:1;">🗺️ Terrain + OSM</button>
+                        <button id="btn-style-photoreal" class="btn-ui active" onclick="set3DStyle('photoreal')" style="flex:1;">🌆 Google Photorealistic</button>
+                    </div>
+                    <p class="desc-text" style="margin-top:4px;"><b>Terrain + OSM:</b> Cesium WorldTerrain elevation with grey OSM building footprints. <b>Photorealistic:</b> Google's textured 3D mesh (Ion asset 2275207) — replaces terrain and OSM buildings to avoid them overlapping/z-fighting.</p>
+
+                    <label style="margin-top: 12px;">Cesium Ion Token <span style="font-weight:400;">— enables WorldTerrain, OSM Buildings & free Photorealistic Tiles</span></label>
+                    <div style="display:flex; gap:8px; margin-top:6px;">
+                        <input type="text" id="cesium-token-input" placeholder="eyJhbGci..." style="flex:1; font-size:0.75rem; padding:6px;">
+                        <button onclick="applyCesiumIonToken()" style="flex-shrink:0;">Apply</button>
+                    </div>
+                    <p class="desc-text" style="margin-top:4px;">Get a free token at <a href="https://ion.cesium.com" target="_blank" style="color:#f59e0b;">ion.cesium.com</a>.</p>
+                    <p class="desc-text" id="photoreal-status" style="margin-top:8px; display:none; font-weight:600;"></p>
+
+                    <button onclick="clearSavedKeys()" class="danger" style="margin-top:12px; width:100%;">Clear saved keys on this device</button>
+                </div>
+                </div>
+
+                <div class="settings-panel-content" data-tab="preloading">
+                <div class="settings-section" style="border-color: #06b6d4; background: rgba(6, 182, 212, 0.08);">
+                    <h3 style="color: #06b6d4;">🗺️ Preloading</h3>
+                    <p class="desc-text">Streams terrain, buildings, and 3D tiles in a radius around a location <b>before</b> you actually get there, so the area is fully ready the moment you arrive — no pop-in, no stutter.</p>
+
+                    <label style="margin-top: 12px;">Preload Radius: <span id="val-preload-radius">3.0</span> km</label>
+                    <input type="range" class="slider" id="set-preload-radius" min="0.5" max="15" step="0.5" value="3" oninput="updatePreloadRadius(this.value)">
+                    <p class="desc-text">Used automatically every time you confirm a spawn location — the loading screen now waits until this whole area is preloaded before you appear, so there are no further loading times once you're in. Larger radius = smoother arrival but a longer initial wait.</p>
+
+                    <button onclick="quickPreloadArea()" style="margin-top: 14px; width: 100%; background: #06b6d4; color: #03242b; font-weight: 700;">
+                        📍 Preload Around My Current Position
+                    </button>
+                    <p class="desc-text">Quick-access version of the same action — can be used at any time, anywhere, centered on wherever you currently are (also available as the 🗺️ Preload button in the top bar). Shows the same loading screen and briefly pauses the simulation while it streams the area in.</p>
+                </div>
+                </div>
+
+
+                <div class="settings-panel-content" data-tab="gp3dt">
+                <div class="settings-section" style="border-color: #22c55e; background: rgba(34, 197, 94, 0.08);">
+                    <h3 style="color: #22c55e;">🏙️ GP3DT Quality &amp; Rendering</h3>
+                    <p class="desc-text">Only applies when Google Photorealistic 3D Tiles is active. Changes take effect immediately.</p>
+
+                    <label style="margin-top: 10px;">🏗️ Collision Floor Tolerance: <span id="val-hitbox-tolerance">1.5 m</span></label>
+                    <div style="display:flex; justify-content:space-between; font-size:0.72rem; color:var(--text-muted); margin-top:3px;">
+                        <span>🧱 Strict (clip-proof)</span>
+                        <span>🌉 Lenient (fly under bridges)</span>
+                    </div>
+                    <input type="range" class="slider" id="set-hitbox-tolerance" min="0" max="200" step="1" value="1.5" oninput="updateHitboxTolerance(this.value)">
+                    <p class="desc-text">How far below a GP3DT surface (building roof, bridge deck, or terrain) the plane can travel before being snapped back up. <b>Default 1.5 m</b> stops clipping through real ground. Raise to ~30–60 m to fly under bridges and overpasses without being ejected upward. Setting it very high (150 m+) effectively disables the floor — the plane can pass through terrain entirely.</p>
+
+                    <label style="margin-top: 10px;">Quality Preset</label>
+                    <select id="gp3dt-quality-preset" class="input-select" onchange="setGP3DTPreset(this.value)">
+                        <option value="ultra-low" selected>🐌 Ultra Low (512 MB, Fastest)</option>
+                        <option value="normal">⚡ Normal (2 GB, Balanced)</option>
+                        <option value="ultra-high">🚀 Ultra High (4 GB, Best Quality)</option>
+                    </select>
+                    <p class="desc-text">Presets configure LOD quality, memory cache, shadows, fog, and streaming behaviour.</p>
+
+                    <div class="gp3dt-advanced">
+                        <p class="desc-text" style="font-weight:600; color:var(--text-main); margin-bottom:8px;">Advanced (manual override)</p>
+
+                        <label>Screen Space Error: <span id="val-gp3dt-sse" class="desc-text">16</span></label>
+                        <input type="range" id="set-gp3dt-sse" class="slider" min="2" max="64" step="2" value="16"
+                               oninput="updateGP3DTAdvancedSetting('maximumScreenSpaceError', this.value); document.getElementById('val-gp3dt-sse').textContent = this.value">
+                        <p class="desc-text">Higher = lower quality but faster. Ultra Low: 64 · Normal: 16 · Ultra High: 2.</p>
+
+                        <label style="margin-top:12px;">Memory Cache (MB): <span id="val-gp3dt-mem" class="desc-text">2048</span></label>
+                        <input type="range" id="set-gp3dt-mem" class="slider" min="512" max="4096" step="512" value="2048"
+                               oninput="updateGP3DTAdvancedSetting('maximumMemoryUsage', this.value); document.getElementById('val-gp3dt-mem').textContent = this.value">
+                        <p class="desc-text">Tile cache size. Higher = more RAM but less re-streaming on revisit.</p>
+
+                        <label style="margin-top:12px;">Fog Density: <span id="val-gp3dt-fog" class="desc-text">0.0001</span></label>
+                        <input type="range" id="set-gp3dt-fog" class="slider" min="0" max="0.001" step="0.0001" value="0.0001"
+                               oninput="updateGP3DTAdvancedSetting('fogDensity', this.value); document.getElementById('val-gp3dt-fog').textContent = this.value">
+                        <p class="desc-text">0 = no fog (clear). Higher = atmospheric haze. Ultra High: 0 · Ultra Low: 0.0005.</p>
+
+                        <label style="margin-top:12px;">Shadow Quality</label>
+                        <select id="set-gp3dt-shadows" class="input-select"
+                                onchange="updateGP3DTAdvancedSetting('shadowQuality', parseInt(this.value))">
+                            <option value="0">Off (Fastest)</option>
+                            <option value="1">Low (Cast Only)</option>
+                            <option value="2" selected>Medium (Balanced)</option>
+                            <option value="3">High (Best)</option>
+                        </select>
+                        <p class="desc-text">Shadows on terrain and buildings. Higher = more realistic but slower.</p>
+
+                        <label style="align-items:center; cursor:pointer; margin-top:12px;">
+                            Dynamic Screen Space Error
+                            <input type="checkbox" id="set-gp3dt-dynamic-sse" checked style="width:20px; height:20px;"
+                                   onchange="updateGP3DTAdvancedSetting('dynamicScreenSpaceError', this.checked)">
+                        </label>
+                        <p class="desc-text">Automatically adjusts quality based on performance. Recommended ON.</p>
+
+                        <label style="align-items:center; cursor:pointer; margin-top:8px;">
+                            Preload Flight Destinations
+                            <input type="checkbox" id="set-gp3dt-preload" checked style="width:20px; height:20px;"
+                                   onchange="updateGP3DTAdvancedSetting('preloadFlightDestinations', this.checked)">
+                        </label>
+                        <p class="desc-text">Pre-streams tiles ahead of movement direction. Better for planes; uses more bandwidth.</p>
+                    </div>
+                </div>
+                </div>
+
+                <div class="settings-panel-content" data-tab="troubleshoot">
+                <div class="settings-section" style="border-color: #ef4444; background: rgba(239, 68, 68, 0.08);">
+                    <h3 style="color: #ef4444;">🔧 Troubleshooting</h3>
+                    <p class="desc-text" style="color: #fca5a5;">Press this if your car, airplane, or bus doesn't load correctly. This resets all saved data and reloads the simulator fresh.</p>
+                    <button
+                        onclick="if(confirm('This will clear all saved settings and reload. Continue?')) { localStorage.clear(); location.reload(); }"
+                        style="margin-top: 12px; width: 100%; background: #ef4444; color: white; border: none; padding: 12px; border-radius: 8px; font-size: 1rem; font-weight: bold; cursor: pointer; letter-spacing: 0.5px;">
+                        🔄 Reset &amp; Fix Loading Issues
+                    </button>
+                </div>
+                </div>
+
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ─── PRELOAD LOADING SCREEN ─────────────────────────────────────────────
+         Shown by preloadAreaAroundLocation() in script.js, both when confirming
+         a new spawn location and when the quick-access "🗺️ Preload" button is
+         used mid-game. Physics/camera updates pause (see `gamePreloading` in
+         script.js) for as long as this is visible. ───────────────────────── -->
+    <div id="preload-screen" class="modal-overlay" style="display:none;">
+        <div id="preload-box">
+            <div id="preload-spinner"></div>
+            <h2 id="preload-title">🗺️ Preloading Area…</h2>
+            <p id="preload-subtitle">Streaming terrain &amp; tiles…</p>
+            <div id="preload-bar-track">
+                <div id="preload-bar-fill"></div>
+            </div>
+            <p id="preload-pct">0%</p>
+        </div>
+    </div>
+
+    <div id="ui-bottom-left" class="panel">
+        <p class="info-text" id="coord-info">Lat: 0.00000, Lng: 0.00000</p>
+        <p class="info-text" id="alt-info" style="display: none;">ALT: 0 ft</p>
+    </div>
+
+    <div id="ui-bottom-right" class="panel">
+        <div class="speed-display">
+            <h1 class="speed-val" id="speed-val">000</h1>
+            <span style="color: var(--text-muted); font-weight: bold;" id="speed-unit-text">KPH</span>
+        </div>
+        <div class="speed-controls">
+            <button class="unit-btn active" onclick="setSpeedUnit('KPH')">KPH</button>
+            <button class="unit-btn" onclick="setSpeedUnit('MPH')">MPH</button>
+            <button class="unit-btn" onclick="setSpeedUnit('KNOTS')">KNOTS</button>
+        </div>
+    </div>
+
+    <div id="gps-window" class="panel">
+        <div id="gps-header">
+            <span>📡 GPS Navigation</span>
+            <span style="font-size: 1.2rem; cursor: pointer;" onclick="toggleGPS()">×</span>
+        </div>
+        <div id="gps-content">
+            <div class="input-group">
+                <input type="text" id="gps-search" placeholder="Search destination...">
+                <button onclick="searchLocation()">Go</button>
+            </div>
+            <div id="gps-nav-info">
+                <div style="font-size: 0.9rem; color: var(--text-muted);">Navigating to Destination</div>
+                <div style="font-size: 1.5rem; font-weight: bold;" id="gps-dist">0.00 km</div>
+                <div class="compass-container">
+                    <svg id="gps-arrow" viewBox="0 0 24 24" width="30" height="30" fill="#22c55e">
+                        <path d="M12 2L4 20L12 17L20 20Z" />
+                    </svg>
+                </div>
+                <div class="input-group" style="margin-top: 5px;">
+                    <button style="flex: 1;" onclick="teleportToDest()">Teleport</button>
+                    <button class="danger" style="flex: 1;" onclick="cancelNavigation()">Cancel</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ─── GPS MINI-MAP OVERLAY (Picture-in-Picture Navigation) ────────── -->
+    <div id="gps-minimap-overlay" class="panel">
+        <div id="gps-minimap-header">
+            <div id="gps-minimap-title">
+                <span id="gps-minimap-icon">🗺️</span>
+                <span>Navigation</span>
+            </div>
+            <div id="gps-minimap-dist-wrap">
+                <span id="gps-minimap-dist">—</span>
+            </div>
+        </div>
+        <div id="gps-minimap-viewport">
+            <!-- Leaflet map fills this; gets CSS-rotated for head-up -->
+            <div id="gps-minimap"></div>
+            <!-- Vehicle arrow — fixed at viewport center, always points UP (= heading) -->
+            <div id="gps-minimap-vehicle">
+                <svg viewBox="0 0 20 28" xmlns="http://www.w3.org/2000/svg" width="20" height="28">
+                    <polygon points="10,0 20,26 10,20 0,26" fill="#22c55e" stroke="white" stroke-width="1.5" stroke-linejoin="round"/>
+                </svg>
+            </div>
+            <!-- Compass North indicator (top of overlay) -->
+            <div id="gps-minimap-north">N</div>
+            <!-- Accuracy ring pulse at center -->
+            <div id="gps-minimap-accuracy-ring"></div>
+        </div>
+        <div id="gps-minimap-footer">
+            <span id="gps-minimap-dest-label">No destination set</span>
+            <div id="gps-minimap-zoom-btns">
+                <button id="nav-zoom-in"  onclick="navMapZoom(1)">+</button>
+                <button id="nav-zoom-out" onclick="navMapZoom(-1)">−</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="mobile-controls-ground">
+        <div id="d-pad-container" class="steering-module">
+            <div class="d-pad-btn" id="btn-left">←</div>
+            <div class="d-pad-btn" id="btn-right">→</div>
+        </div>
+        <div id="joystick-container" class="steering-module" style="display:none;">
+            <div id="joystick-base">
+                <div id="joystick-knob"></div>
+            </div>
+        </div>
+        <div class="pedal-container" id="pedal-wrapper">
+            <div class="pedal pedal-brake" id="btn-brake">Brake</div>
+            <div class="pedal pedal-gas" id="btn-gas">Gas</div>
+        </div>
+    </div>
+
+    <div id="mobile-controls-plane" style="display:none;">
+        <div id="flight-joystick-base">
+            <div id="flight-joystick-knob"></div>
+        </div>
+        <div id="flight-buttons">
+            <div class="btn-group" style="flex-direction: column; align-items: center; gap: 5px; padding: 5px 0;">
+                <label style="color: white; font-size: 10px; font-weight: bold; letter-spacing: 0.5px;">THROTTLE</label>
+                <input type="range" id="flight-throttle-slider" min="0" max="100" value="0">
+                <span id="flight-throttle-val" style="color: #22c55e; font-size: 11px; font-weight: bold;">0%</span>
+            </div>
+            <div class="btn-group">
+                <button id="btn-flight-brake" class="action-btn">BRAKE</button>
+                <button id="btn-flight-reverse" class="action-btn">REV</button>
+                <button id="btn-pitch-invert" class="action-btn" onclick="togglePitchInvert()" title="Invert pitch (I key / Joystick btn 3)">INV↕</button>
+            </div>
+            <div class="btn-group" style="flex-direction: column; align-items: center; gap: 5px; padding: 5px 0;">
+                <label style="color: white; font-size: 10px; font-weight: bold; letter-spacing: 0.5px;">RUDDER</label>
+                <input type="range" id="flight-yaw-slider" min="-1" max="1" step="0.05" value="0">
+            </div>
+        </div>
+    </div>
+
+    <!-- Flashlight — Cesium 3D first-person only. Shown/hidden via
+         _updateFlashlightButtonVisibility() in script.js (setCesiumCameraView /
+         setRenderMode). Light itself follows the camera every frame in
+         updateCesiumCamera(). -->
+    <button id="btn-flashlight" class="flashlight-btn" onclick="toggleFlashlight()" style="display:none;" title="Toggle flashlight (1st person only)">🔦</button>
+
+    <!-- TakeOff button — shown in Cesium 3D mode when plane reaches V1 (100 kts) -->
+
+
+<!-- ─── COCKPIT CAMERA ADJUSTER MODAL ───────────────────────────────────── -->
+<div id="cockpit-cam-modal" class="modal-overlay" style="display:none;">
+    <div id="cockpit-cam-box">
+        <button class="ccam-close" onclick="closeCockpitCamModal()">✕</button>
+        <h2 class="ccam-title">🎥 Cockpit Camera</h2>
+
+        <div class="ccam-grid">
+            <div class="ccam-col">
+                <div class="ccam-label">Horizontal<br>Turn</div>
+                <div class="ccam-btns">
+                    <button class="ccam-btn" onclick="adjCockpit('horizontalTurn', 1)">+</button>
+                    <button class="ccam-btn" onclick="adjCockpit('horizontalTurn',-1)">−</button>
+                </div>
+                <div class="ccam-val" id="ccam-val-horizontalTurn">0.0°</div>
+            </div>
+            <div class="ccam-col">
+                <div class="ccam-label">Vertical<br>Turn</div>
+                <div class="ccam-btns">
+                    <button class="ccam-btn" onclick="adjCockpit('verticalTurn', 1)">+</button>
+                    <button class="ccam-btn" onclick="adjCockpit('verticalTurn',-1)">−</button>
+                </div>
+                <div class="ccam-val" id="ccam-val-verticalTurn">0.0°</div>
+            </div>
+            <div class="ccam-col">
+                <div class="ccam-label">Up / Down</div>
+                <div class="ccam-btns">
+                    <button class="ccam-btn" onclick="adjCockpit('upDown', 0.1)">+</button>
+                    <button class="ccam-btn" onclick="adjCockpit('upDown',-0.1)">−</button>
+                </div>
+                <div class="ccam-val" id="ccam-val-upDown">4.50 m</div>
+            </div>
+
+            <div class="ccam-col">
+                <div class="ccam-label">Side<br>Position</div>
+                <div class="ccam-btns">
+                    <button class="ccam-btn" onclick="adjCockpit('sidePosition', 0.1)">+</button>
+                    <button class="ccam-btn" onclick="adjCockpit('sidePosition',-0.1)">−</button>
+                </div>
+                <div class="ccam-val" id="ccam-val-sidePosition">−0.80 m</div>
+            </div>
+            <div class="ccam-col">
+                <div class="ccam-label">Field<br>of View</div>
+                <div class="ccam-btns">
+                    <button class="ccam-btn" onclick="adjCockpit('fovOffset', 1)">+</button>
+                    <button class="ccam-btn" onclick="adjCockpit('fovOffset',-1)">−</button>
+                </div>
+                <div class="ccam-val" id="ccam-val-fovOffset">0.0°</div>
+            </div>
+            <div class="ccam-col">
+                <div class="ccam-label">Front / Back</div>
+                <div class="ccam-btns">
+                    <button class="ccam-btn" onclick="adjCockpit('frontBack', 0.1)">+</button>
+                    <button class="ccam-btn" onclick="adjCockpit('frontBack',-0.1)">−</button>
+                </div>
+                <div class="ccam-val" id="ccam-val-frontBack">14.00 m</div>
+            </div>
+        </div>
+
+        <div class="ccam-footer">
+            <button class="ccam-foot-btn" onclick="closeCockpitCamModal()">OK</button>
+            <button class="ccam-foot-btn" id="ccam-save-btn" onclick="saveCockpitCam()">Save</button>
+            <button class="ccam-foot-btn" onclick="loadLastSaveCockpitCam()">Last Save</button>
+            <button class="ccam-foot-btn" onclick="resetCockpitCam()">Reset Defaults</button>
+        </div>
+    </div>
+</div>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         SPAWN SELECTION SYSTEM
+         All three layers sit above everything else (z-index 9000+)
+         ═════════════════════════════════════════════════════════════════ -->
+
+    <!-- 1. Start Screen — shown on page load -->
+    <div id="spawn-start-screen">
+        <div id="spawn-start-inner">
+            <div id="spawn-logo-wrap">
+                <img id="spawn-logo" src="icon-513.png" alt="Simulator Logo" onerror="this.style.display='none'; document.getElementById('spawn-logo-fallback').style.display='flex';">
+                <div id="spawn-logo-fallback" style="display:none;">✈️</div>
+            </div>
+            <h1 id="spawn-title">3D Driving &amp; Flight Simulator</h1>
+            <p id="spawn-subtitle">Open-world vehicle simulation · Real terrain · Cesium globe</p>
+            <button id="spawn-select-btn" onclick="openSpawnSelector()">
+                <span>🌍</span> Select Spawn
+            </button>
+            <p id="spawn-loading-hint">Cesium terrain loading in background…</p>
+        </div>
+    </div>
+
+    <!-- 2. Spawn Selector Screen — fullscreen map + controls -->
+    <div id="spawn-selector-screen" style="display:none;">
+        <!-- Globe/Map -->
+        <div id="spawn-map-wrap">
+            <div id="spawn-map"></div>
+            <!-- Floating search bar on map -->
+            <div id="spawn-search-bar-wrap">
+                <input id="spawn-search-input" type="text" placeholder="Search 🔍: IATA, ICAO, NAME" autocomplete="off" oninput="spawnSearchDebounced()" onkeydown="if(event.key==='Enter') spawnSearchCommit()">
+                <div id="spawn-search-results" style="display:none;"></div>
+            </div>
+            <!-- Map attribution note -->
+            <div id="spawn-map-note">
+                (OurAirports data, only necessary when Highlight Airports is enabled or when searching by IATA, ICAO or airport name.)
+            </div>
+        </div>
+
+        <!-- Sidebar -->
+        <div id="spawn-sidebar">
+            <div id="spawn-sidebar-header">
+                <h2 id="spawn-sidebar-title">🌍 Select Spawn Location</h2>
+                <button id="spawn-back-btn" onclick="closeSpawnSelector()">← Back</button>
+            </div>
+
+            <!-- Highlight Airports Toggle -->
+            <div class="spawn-section">
+                <div class="spawn-toggle-row">
+                    <span class="spawn-toggle-label">🛬 Highlight Airports</span>
+                    <button id="spawn-highlight-btn" class="spawn-toggle-btn" onclick="toggleSpawnHighlight()">OFF</button>
+                </div>
+            </div>
+
+            <!-- Airport Type Filters -->
+            <div class="spawn-section" id="spawn-filters-section">
+                <div class="spawn-section-title">Filter Types</div>
+                <div id="spawn-filter-grid">
+                    <label class="spawn-filter-chip">
+                        <input type="checkbox" value="large_airport" checked onchange="applySpawnFilters()"> International
+                    </label>
+                    <label class="spawn-filter-chip">
+                        <input type="checkbox" value="large_airport_incl" checked onchange="applySpawnFilters()"> Large
+                    </label>
+                    <label class="spawn-filter-chip">
+                        <input type="checkbox" value="medium_airport" checked onchange="applySpawnFilters()"> Medium
+                    </label>
+                    <label class="spawn-filter-chip">
+                        <input type="checkbox" value="small_airport" onchange="applySpawnFilters()"> Small
+                    </label>
+                    <label class="spawn-filter-chip">
+                        <input type="checkbox" value="military" onchange="applySpawnFilters()"> Military
+                    </label>
+                    <label class="spawn-filter-chip">
+                        <input type="checkbox" value="heliport" onchange="applySpawnFilters()"> Heliports
+                    </label>
+                    <label class="spawn-filter-chip">
+                        <input type="checkbox" value="seaplane_base" onchange="applySpawnFilters()"> Seaplane
+                    </label>
+                </div>
+            </div>
+
+            <!-- Selected Location Info -->
+            <div id="spawn-selected-info" style="display:none;">
+                <div class="spawn-section spawn-info-section">
+                    <div class="spawn-section-title" id="spawn-info-type-badge">✈️ Airport</div>
+                    <div id="spawn-info-name" class="spawn-info-name">—</div>
+                    <div class="spawn-info-grid">
+                        <div class="spawn-info-item">
+                            <span class="spawn-info-label">ICAO</span>
+                            <span class="spawn-info-val" id="spawn-info-icao">—</span>
+                        </div>
+                        <div class="spawn-info-item">
+                            <span class="spawn-info-label">IATA</span>
+                            <span class="spawn-info-val" id="spawn-info-iata">—</span>
+                        </div>
+                        <div class="spawn-info-item">
+                            <span class="spawn-info-label">Latitude</span>
+                            <span class="spawn-info-val" id="spawn-info-lat">—</span>
+                        </div>
+                        <div class="spawn-info-item">
+                            <span class="spawn-info-label">Longitude</span>
+                            <span class="spawn-info-val" id="spawn-info-lng">—</span>
+                        </div>
+                        <div class="spawn-info-item" id="spawn-info-elev-row">
+                            <span class="spawn-info-label">Elevation</span>
+                            <span class="spawn-info-val" id="spawn-info-elev">—</span>
+                        </div>
+                        <div class="spawn-info-item" id="spawn-info-country-row">
+                            <span class="spawn-info-label">Country</span>
+                            <span class="spawn-info-val" id="spawn-info-country">—</span>
+                        </div>
+                    </div>
+                    <!-- Runway / Operation selector — shown for airports when plane is active -->
+                    <div id="spawn-runway-section" style="display:none; margin-top:12px;">
+                        <div class="spawn-runway-label">✈️ Operation</div>
+                        <div class="spawn-op-tabs" id="spawn-op-tabs">
+                            <label class="spawn-op-tab">
+                                <input type="radio" name="spawn-operation" value="takeoff" checked>
+                                <span>🛫 Takeoff</span>
+                            </label>
+                            <label class="spawn-op-tab">
+                                <input type="radio" name="spawn-operation" value="landing">
+                                <span>🛬 Landing</span>
+                            </label>
+                        </div>
+                        <div class="spawn-runway-label" style="margin-top:10px;">🛣️ Runway</div>
+                        <select id="spawn-runway-select" class="spawn-runway-select">
+                            <option value="">— Select an airport first —</option>
+                        </select>
+                        <div id="spawn-runway-status" class="spawn-runway-status"></div>
+                    </div>
+
+                    <div id="spawn-confirm-btns">
+                        <button id="spawn-confirm-btn" onclick="confirmSpawnLocation()">
+                            🚀 Confirm Spawn
+                        </button>
+                        <button id="spawn-cancel-sel-btn" onclick="clearSpawnSelection()">
+                            ✕ Cancel
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- No selection hint -->
+            <div id="spawn-hint-panel" class="spawn-section">
+                <p class="spawn-hint-text">📍 Click anywhere on the map to select a spawn location, or search for an airport above.</p>
+                <p class="spawn-hint-text" style="margin-top:8px; opacity:0.6;">You can also click an airport marker when Highlight Airports is ON.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Scripts: Leaflet first, then Cesium, then app -->
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet-routing-machine@latest/dist/leaflet-routing-machine.js"></script>
+<script src="https://cesium.com/downloads/cesiumjs/releases/1.117/Build/Cesium/Cesium.js"></script>
+
+<script src="script.js"></script>
+
+<script>
+if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+        navigator.serviceWorker.register("./sw.js")
+            .then(() => console.log("Service Worker registered"))
+            .catch(err => console.error("Service Worker error:", err));
+    });
+}
+</script>
+
+</body>
+</html>
