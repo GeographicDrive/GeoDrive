@@ -259,6 +259,8 @@ function isKeyDown(action) { return !!keys[keyBindings[action]]; }
 // ── Flashlight (first-person only) ───────────────────────────────────────────
 let flashlightOn = false;
 let _flashlightLight = null; // Cesium.DirectionalLight, created lazily, reused every frame
+let _flashlightPrevDynamicLighting = null; // saved scene.atmosphere.dynamicLighting, restored when flashlight turns off
+let _flashlightPrevGlobeLightingFromSun = null; // saved scene.globe.dynamicAtmosphereLightingFromSun, restored when flashlight turns off
 
 // ── Day / Night mode ────────────────────────────────────────────────────────
 let isNightMode = false;
@@ -1032,6 +1034,17 @@ function _makeNightLight() {
 function _restoreAmbientSceneLight() {
     if (!cesiumViewer) return;
     cesiumViewer.scene.light = isNightMode ? _makeNightLight() : new Cesium.SunLight();
+    // Undo the atmosphere/globe overrides applied while the flashlight was
+    // on (see the flashlight block in updateCesiumCamera) so normal
+    // sun-follows-scene.light behavior resumes once it's off.
+    if (_flashlightPrevDynamicLighting !== null && cesiumViewer.scene.atmosphere) {
+        cesiumViewer.scene.atmosphere.dynamicLighting = _flashlightPrevDynamicLighting;
+        _flashlightPrevDynamicLighting = null;
+    }
+    if (_flashlightPrevGlobeLightingFromSun !== null && cesiumViewer.scene.globe) {
+        cesiumViewer.scene.globe.dynamicAtmosphereLightingFromSun = _flashlightPrevGlobeLightingFromSun;
+        _flashlightPrevGlobeLightingFromSun = null;
+    }
 }
 
 /**
@@ -4780,10 +4793,30 @@ function updateCesiumCamera(dt) {
                 cesiumViewer.camera.direction, _flashlightLight.direction
             );
             // Brighter relative punch at night (when ambient light is low)
-            // than during the day (where it'd otherwise be invisible).
-            _flashlightLight.intensity = isNightMode ? 14.0 : 5.0;
+            // than during the day (where it'd otherwise be invisible) — but
+            // capped well below a full SunLight's intensity (~2.0) so it
+            // doesn't blow out exposure/bloom across the whole frame.
+            _flashlightLight.intensity = isNightMode ? 3.0 : 1.5;
             cesiumViewer.scene.light = _flashlightLight;
+            // Both the sky dome (scene.atmosphere) and the ground/fog
+            // atmosphere (scene.globe) read scene.light by default to decide
+            // how bright to render — Globe.dynamicAtmosphereLightingFromSun
+            // defaults to false, meaning ground atmosphere normally follows
+            // scene.light rather than the real sun. So a bright flashlight
+            // light gets misread as "the sun is up" and the whole night sky
+            // flips to daytime blue. Forcing both to key off the real sun
+            // position instead keeps the actual night sky while the
+            // flashlight still lights up nearby terrain/models.
+            if (cesiumViewer.scene.atmosphere && _flashlightPrevDynamicLighting === null) {
+                _flashlightPrevDynamicLighting = cesiumViewer.scene.atmosphere.dynamicLighting;
+                cesiumViewer.scene.atmosphere.dynamicLighting = Cesium.DynamicAtmosphereLightingType.SUNLIGHT;
+            }
+            if (cesiumViewer.scene.globe && _flashlightPrevGlobeLightingFromSun === null) {
+                _flashlightPrevGlobeLightingFromSun = cesiumViewer.scene.globe.dynamicAtmosphereLightingFromSun;
+                cesiumViewer.scene.globe.dynamicAtmosphereLightingFromSun = true;
+            }
         }
+
 
         // Apply cockpit FOV offset on top of the main settings.fov value.
         if (cesiumViewer.scene.camera.frustum &&
