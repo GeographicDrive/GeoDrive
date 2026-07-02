@@ -4097,21 +4097,26 @@ const VEHICLE_MODEL_DEFS = {
     // or backwards in-game, the first things to try are flipping
     // forwardAxis to 'X' or changing extraYawDeg to -90/180.
     //
-    // Scale: measured the actual glb's baked-in bounding box (all node
-    // transforms applied) — raw local size ≈ 185432 × 75314 × 148030
-    // units on X/Y/Z. Calibrated scale so the longer horizontal axis
-    // (fuselage, mapped to Z/forward) matches a real Cessna 172's
-    // 8.28 m length: scale = 8.28 / 148029.68 ≈ 0.0000559. That also
-    // lands the wingspan around ~10.4 m (real: 11.0 m) — close enough
-    // given the raw bbox likely still includes the landing gear/prop.
-    // offset.z lifts the model so its lowest point (wheels) sits at the
-    // ground plane, same convention as 'car' above: |Y_min| × scale.
+    // Scale: the raw glb's baked-in bounding box (all node transforms
+    // applied) measures ≈ 185432 × 75314 × 148030 units on X/Y/Z. The
+    // first pass calibrated scale purely off matching the fuselage axis
+    // to a real Cessna 172's 8.28 m length (scale ≈ 0.0000559), but that
+    // rendered the plane as a tiny speck in-game (confirmed on a real
+    // device screenshot — it looked ~7.5x smaller than it should next to
+    // the road/buildings). Bumped scale ×7.5 to match what actually reads
+    // correctly on screen: scale ≈ 0.000419. offset.z is rescaled by the
+    // same ×7.5 factor (it's derived from |Y_min| × scale, so it has to
+    // track scale 1:1 to keep the wheels sitting on the ground instead of
+    // floating or clipping under the terrain).
+    // If it still looks off, adjust scale directly here (or use
+    // settings.vehicleScale in-game for a quick global size check) and
+    // rescale offset.z by the same ratio.
     cessna: {
         type: 'glb',
         url: 'cessna.glb',
-        scale: 0.0000559,
+        scale: 0.000419,
         minimumPixelSize: 64,
-        offset: [0, 0, 2.11],
+        offset: [0, 0, 15.79],
         upAxis: 'Y',
         forwardAxis: 'Z',
         extraYawDeg: 90
