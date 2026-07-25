@@ -7632,11 +7632,12 @@ async function confirmSpawnLocation() {
     // lookup by ICAO), left null otherwise so no fake lights get drawn.
     _activeRunway = null;
 
-    // Reset the flat 5 km ground-collision disc for this spawn — re-anchored
-    // below to the airport's own centre/elevation when one is known, left
-    // null otherwise (free map click) so ground collision is simply off.
+    // The flat 5 km ground-collision disc (and, critically, the distance
+    // gate updateCesiumCamera uses EVERY FRAME to decide whether groundHeight
+    // should be the real field elevation or fall back to sea level) gets
+    // anchored below, AFTER lat/lng are finalized to the actual resolved
+    // spawn point — see the comment right before that assignment for why.
     const dbCentreElevM = ap.elev != null ? ap.elev * 0.3048 : 0;
-    _activeAirportCenter = (ap.icao && ap.icao !== '—') ? { lat: ap.lat, lng: ap.lng, elevM: dbCentreElevM } : null;
 
     if (isPlaneType(state.vehicle) && rwyVal) {
         try {
@@ -7686,6 +7687,23 @@ async function confirmSpawnLocation() {
             _activeRunway = Object.assign({}, longest, { icao: ap.icao });
         }
     }
+
+    // ── Anchor the ground-reference disc to the ACTUAL spawn point ─────────
+    // Previously this used ap.lat/ap.lng — the airport's database reference
+    // point — which can easily sit more than the disc's 5 km radius away
+    // from where the aircraft actually spawns: a runway threshold on a
+    // large field, or (worst case) an 8 nm final approach point, which is
+    // ALWAYS ~14.8 km out and therefore always outside a 5 km disc no
+    // matter what. Every frame, updateCesiumCamera checks the distance
+    // from the vehicle to this exact point/radius to decide whether
+    // groundHeight should be the real sampled field elevation or fall back
+    // to sea level (0 m) — so an airport-centre anchor meant the "correct"
+    // elevation we sample below was frequently discarded the instant the
+    // game loop started, snapping the plane/camera to sea level. Anchoring
+    // to lat/lng (the resolved spawn point itself) instead means the
+    // vehicle starts life exactly at the disc's centre, so this distance
+    // gate can never spuriously exclude it right out of spawn.
+    _activeAirportCenter = (ap.icao && ap.icao !== '—') ? { lat: lat, lng: lng, elevM: dbCentreElevM } : null;
 
     // ── Wait for the REAL terrain provider (not the flat Ellipsoid
     // placeholder) before sampling anything ────────────────────────────────
