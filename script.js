@@ -7752,29 +7752,38 @@ async function confirmSpawnLocation() {
     }
 
     // ── Resolve the REAL ground elevation before placing anything at all ───
-    // This is what stops the plane ever spawning below/inside the terrain:
-    // lat/lng/elev above are now final (runway threshold or airport centre,
-    // whichever applies), so this samples the real terrain at that exact
-    // spot ONCE — this is the only height sample for the entire spawn, and
-    // nothing else in the spawn/game-loop code samples height again after
-    // this — and corrects `elev` by the same delta the disc's centre moved,
-    // preserving any legitimate threshold-vs-centre elevation difference
-    // instead of just overwriting it. Usually resolves in well under a
-    // second (instant on repeat visits to an airport, thanks to the
-    // cache); only pays a longer one-time cost the very first time a given
-    // airport's terrain has never been sampled in this session. Now runs
-    // with the camera already sitting above the spawn point (step 0 above),
-    // so the tiles being sampled here are ones actually being streamed in,
-    // not empty space.
+    // This is what stops the plane ever spawning below/inside the terrain.
+    //
+    // IMPORTANT: this samples at the ACTUAL spawn point (lat/lng — the
+    // runway threshold, the 8 nm final-approach point, or the airport
+    // centre, whichever applies), NOT at the airport's reference centre
+    // (ap.lat/ap.lng). The previous version always sampled the centre and
+    // then applied that single centre-based delta to everything else,
+    // which assumes the whole field sits at one uniform elevation. That's
+    // fine for flat airports (e.g. KLAX) but wrong for anything with real
+    // terrain relief across the field or a distant approach point (hills,
+    // mountain airports) — the centre can be sampled perfectly correctly
+    // while the actual spawn point still sits at a meaningfully different
+    // real elevation, which is exactly the "randomly too high/too low"
+    // behaviour reported outside flat airports.
+    //
+    // No icao-keyed cache here on purpose: the specific point sampled now
+    // depends on which runway/threshold/approach was chosen, not just
+    // which airport, so a per-icao cache would silently reuse a stale
+    // value from a different runway. Runs with the camera already sitting
+    // above the spawn point (step 0 above), so the tiles being sampled
+    // here are ones actually being streamed in, not empty space.
     if (_activeAirportCenter) {
         setLoadingText('Sampling real ground elevation…');
-        const realCentreElevM = await _resolveAirportElevation(ap.icao, ap.lat, ap.lng);
+        const realSpotElevM = await Promise.race([
+            _sampleRealGroundElevation(lat, lng),
+            new Promise(resolve => setTimeout(() => resolve(null), 4000))
+        ]);
         if (gen !== _spawnGen) return; // player cancelled/respawned elsewhere while we were waiting
 
-        if (realCentreElevM != null) {
-            const delta = realCentreElevM - dbCentreElevM;
-            if (elev != null) elev += delta / 0.3048; // shift threshold elev by the same real-vs-database delta
-            _activeAirportCenter.elevM = realCentreElevM;
+        if (realSpotElevM != null) {
+            elev = realSpotElevM / 0.3048; // trust the live sample over the DB field entirely
+            _activeAirportCenter.elevM = realSpotElevM;
         }
     }
     // Disc is now placed at its final, real-terrain-anchored height and
@@ -7894,7 +7903,7 @@ async function confirmSpawnLocation() {
     // one settled re-check to be trustworthy.
     if (_activeAirportCenter && cesiumViewer) {
         setLoadingText('Confirming ground level…');
-        const settledElevM = await _sampleRealGroundElevation(ap.lat, ap.lng);
+        const settledElevM = await _sampleRealGroundElevation(lat, lng);
         if (gen !== _spawnGen) return; // player cancelled/respawned elsewhere while we were waiting
 
         if (settledElevM != null) {
@@ -7902,9 +7911,8 @@ async function confirmSpawnLocation() {
             const correctionM = settledElevM - priorElevM;
             // Ignore sub-half-metre noise — not worth re-placing anything for.
             if (Math.abs(correctionM) > 0.5) {
-                _airportElevSampleCache[ap.icao] = settledElevM;
                 _activeAirportCenter.elevM = settledElevM;
-                if (elev != null) elev += correctionM / 0.3048;
+                elev = settledElevM / 0.3048;
 
                 if (isPlaneType(state.vehicle)) {
                     flight.groundRef = settledElevM;
