@@ -3264,6 +3264,49 @@ const _airportElevSampleCache = {};
 let _spawnGen = 0;
 
 /**
+ * _waitForTerrainSettled — replaces the old "wait exactly 2 rendered
+ * frames" hack in confirmSpawnLocation. Two frames is enough for the tile
+ * loader to START requesting the terrain column under the pre-position
+ * camera, but NOT enough to guarantee the highest-detail mesh has actually
+ * streamed in and been rendered yet. Sampling height (and freezing it into
+ * _activeAirportCenter.elevM / flight.groundRef) while the mesh is still a
+ * coarser placeholder bakes in a slightly-wrong elevation — one that never
+ * gets corrected afterwards, since that value is frozen for the rest of
+ * the spawn. Over the following second or two, Cesium keeps refining the
+ * globe mesh in the background toward its real (final) height, and since
+ * the camera/plane anchor is frozen at the old, wrong height, the terrain
+ * visibly rises/sinks underneath them once it's done settling — most
+ * noticeable in first-person, where the cockpit floor is only a couple of
+ * metres from the ground.
+ *
+ * Fix: poll scene.globe.tilesLoaded (true once no tiles are pending for
+ * the current view) every frame instead of counting a fixed number of
+ * frames, so the elevation sample below only runs once the mesh actually
+ * has nothing left to load. Capped at maxMs so a slow/unreachable tile
+ * server can never hang the spawn screen forever — same safety margin
+ * philosophy as the other timeouts in this flow.
+ */
+function _waitForTerrainSettled(maxMs = 2500) {
+    const start = performance.now();
+    return new Promise(resolve => {
+        function check() {
+            const globe = cesiumViewer && cesiumViewer.scene && cesiumViewer.scene.globe;
+            const settled = !globe || globe.tilesLoaded;
+            if (settled || performance.now() - start > maxMs) {
+                resolve();
+            } else {
+                requestAnimationFrame(check);
+            }
+        }
+        // Force at least a couple of rendered frames before the first
+        // check — tilesLoaded can read stale/true for an instant right
+        // after camera.setView, before the loader has had a chance to
+        // notice new tiles are needed.
+        requestAnimationFrame(() => requestAnimationFrame(check));
+    });
+}
+
+/**
  * _sampleRealGroundElevation — reads the actual terrain height Cesium has
  * for a given lat/lng, so the flat collision disc (and the initial spawn
  * placement itself) can be anchored to reality instead of trusting a
@@ -7680,11 +7723,16 @@ async function confirmSpawnLocation() {
                     roll:    0
                 }
             });
-            // Give the tile loader a couple of render frames to actually
-            // issue requests for the column now under the camera before we
-            // force-sample it below — setView alone doesn't guarantee a
-            // frame has rendered yet.
-            await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+            // Wait for the terrain mesh under the camera to actually finish
+            // loading/refining — not just a couple of frames, which was only
+            // enough for the loader to START requesting tiles, not for the
+            // highest-detail mesh to be in place. Sampling too early froze a
+            // slightly-wrong elevation that the visible terrain would later
+            // "settle" past, making the camera/plane look like they sank into
+            // (or floated above) the ground a moment after spawning. See
+            // _waitForTerrainSettled for the full explanation.
+            setLoadingText('Esperando a que el terreno se asiente…');
+            await _waitForTerrainSettled();
             if (gen !== _spawnGen) return; // player cancelled/respawned elsewhere while we were waiting
         } catch (e) {
             console.warn('[Spawn] High pre-position failed:', e);
