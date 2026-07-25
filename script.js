@@ -3377,7 +3377,19 @@ async function _sampleRealGroundElevation(lat, lng) {
             // disc (and the plane) got anchored to roof height, not asphalt.
             // Restricting to the globe/terrain guarantees we always measure
             // the actual ground, never a structure sitting on top of it.
-            const excludeObjs = photorealTileset ? [photorealTileset] : undefined;
+            const excludeObjs = [];
+            if (photorealTileset) excludeObjs.push(photorealTileset);
+            // Also exclude our own vehicle models — sampleHeightMostDetailed
+            // rays test ANY primitive in the scene by default, and these are
+            // real Cesium.Model primitives that stay in scene.primitives even
+            // while hidden (show=false just skips drawing, it doesn't remove
+            // them from ray tests in every Cesium version). If one happens to
+            // still be positioned near this exact column from a previous
+            // spawn/vehicle switch, the ray could hit the model instead of
+            // the ground, handing back a bogus "elevation".
+            Object.keys(vehiclePrimitives).forEach(type => {
+                vehiclePrimitives[type].forEach(p => excludeObjs.push(p));
+            });
             const results = await cesiumViewer.scene.sampleHeightMostDetailed([cart], excludeObjs);
             const hit = results && results[0];
             // Reject the degenerate (0,0,0) ray-miss result explicitly, in
@@ -7859,6 +7871,71 @@ async function confirmSpawnLocation() {
             await new Promise(r => setTimeout(r, 150));
         }
         if (gen !== _spawnGen) return; // player cancelled/respawned elsewhere while we were waiting
+    }
+
+    // ── 4b. Re-sample elevation now that tiles are ACTUALLY fully loaded ───
+    // This is the real fix for the "sometimes way too high / way too low"
+    // randomness: step above ("Placing collision disc…") took its one
+    // height sample BEFORE this wait — at whatever level of tile detail
+    // happened to exist at that instant, which could be a coarse
+    // placeholder mesh. This step's tile-load wait only ran AFTER that
+    // sample was already frozen into _activeAirportCenter.elevM /
+    // flight.groundRef / the camera's position, so no matter how long we
+    // waited here, nothing ever corrected the number itself — the spawn
+    // just consistently used whatever was sampled too early.
+    //
+    // Now that globeDone/tilesetDone are both true (or we hit the 8s cap),
+    // take one more real-ground sample at the exact same point and, if it
+    // differs meaningfully from what we already used, shift everything
+    // (disc height, flight.groundRef, and the camera position placed in
+    // step 3) by that delta before revealing. Bypasses the elevation
+    // cache deliberately — the cache is keyed for the FAST path on repeat
+    // visits, but the first visit to any airport in a session needs this
+    // one settled re-check to be trustworthy.
+    if (_activeAirportCenter && cesiumViewer) {
+        setLoadingText('Confirming ground level…');
+        const settledElevM = await _sampleRealGroundElevation(ap.lat, ap.lng);
+        if (gen !== _spawnGen) return; // player cancelled/respawned elsewhere while we were waiting
+
+        if (settledElevM != null) {
+            const priorElevM = _activeAirportCenter.elevM;
+            const correctionM = settledElevM - priorElevM;
+            // Ignore sub-half-metre noise — not worth re-placing anything for.
+            if (Math.abs(correctionM) > 0.5) {
+                _airportElevSampleCache[ap.icao] = settledElevM;
+                _activeAirportCenter.elevM = settledElevM;
+                if (elev != null) elev += correctionM / 0.3048;
+
+                if (isPlaneType(state.vehicle)) {
+                    flight.groundRef = settledElevM;
+                }
+
+                // Re-place the camera at the corrected altitude — same
+                // logic as step 3 above, just with the settled elevation.
+                try {
+                    const elevMFinal = elev != null ? elev * 0.3048 : settledElevM;
+                    let camAlt, camPitch;
+                    if (isPlaneType(state.vehicle) && rwyVal && !isTakeoff) {
+                        camAlt   = elevMFinal + 2500 * 0.3048;
+                        camPitch = -5;
+                    } else {
+                        camAlt   = Math.max(elevMFinal + 50, 200);
+                        camPitch = -5;
+                    }
+                    const pos = Cesium.Cartesian3.fromDegrees(lng, lat, camAlt + 10);
+                    cesiumViewer.camera.setView({
+                        destination: pos,
+                        orientation: {
+                            heading: Cesium.Math.toRadians(state.heading),
+                            pitch:   Cesium.Math.toRadians(camPitch),
+                            roll:    0
+                        }
+                    });
+                } catch (e) {
+                    console.warn('[Spawn] Corrected camera placement failed:', e);
+                }
+            }
+        }
     }
 
     // ── 5. Enforce a minimum 5-second loading screen ────────────────────────
