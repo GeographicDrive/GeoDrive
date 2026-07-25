@@ -1809,6 +1809,59 @@ function applyGP3DTGridCulling() {
 let _gp3dtDistanceHandler = null;
 let _gp3dtDistanceIsFar = null; // tri-state cache: null = unknown yet, so first check always applies
 
+/**
+ * ── GP3DT DETAIL DISTANCE ─────────────────────────────────────────────────
+ * Settings → GP3DT → "GP3DT Detail Distance" slider (1–100). Unlike
+ * "GP3DT Render Distance" above (which just decides the altitude/distance
+ * beyond which GP3DT is hidden entirely), this one controls how far away a
+ * tile can be and STILL get rendered at full detail. Cesium's
+ * dynamicScreenSpaceErrorDensity is what actually causes that "there's a
+ * building a kilometer away but it looks blank/low-res" effect — it makes
+ * the tileset treat distant tiles as if they had a much higher (worse)
+ * screen-space error than they really do, so they get skipped or replaced
+ * with coarser LOD tiles to save perf. Lower density = detail preserved
+ * further out; higher density = detail drops off quickly with distance.
+ *
+ * The slider itself is framed as "distance" (higher = see detail farther),
+ * so we map it inversely onto density with an exponential curve — small
+ * slider changes near the low end matter a lot, matching how the
+ * dynamicScreenSpaceErrorDensity value itself behaves.
+ */
+const GP3DT_DETAIL_DENSITY_MIN = 0.0002;  // slider = 100 → detail preserved at max distance
+const GP3DT_DETAIL_DENSITY_MAX = 0.02;    // slider = 1   → detail drops off very close to camera
+
+function _gp3dtDetailDistanceLabel(val) {
+    if (val <= 15) return 'Short';
+    if (val <= 45) return 'Normal';
+    if (val <= 75) return 'Far';
+    return 'Ultra-Far';
+}
+
+function updateGP3DTDetailDistance(val) {
+    const slider = Math.min(100, Math.max(1, parseFloat(val)));
+    const t = (slider - 1) / 99; // 0..1
+    const density = GP3DT_DETAIL_DENSITY_MAX * Math.pow(GP3DT_DETAIL_DENSITY_MIN / GP3DT_DETAIL_DENSITY_MAX, t);
+
+    gp3dtSettings.dynamicScreenSpaceErrorDensity = density;
+    // Manual slider tweak — no longer guaranteed to match a preset exactly.
+    gp3dtSettings.preset = 'custom';
+    const presetSelect = document.getElementById('gp3dt-quality-preset');
+    if (presetSelect) {
+        if (!presetSelect.querySelector('option[value="custom"]')) {
+            const opt = document.createElement('option');
+            opt.value = 'custom'; opt.textContent = '✏️ Custom';
+            presetSelect.appendChild(opt);
+        }
+        presetSelect.value = 'custom';
+    }
+
+    const label = document.getElementById('val-gp3dt-detail-distance');
+    if (label) label.textContent = _gp3dtDetailDistanceLabel(slider);
+
+    if (settings.mapStyle === 'photoreal') applyGP3DTQualitySettings();
+    saveSettingsV2();
+}
+
 function updateGP3DTRenderDistance(val) {
     settings.gp3dtRenderDistance = Math.max(600, parseFloat(val)); // 600m floor
     const label = document.getElementById('val-gp3dt-render-distance');
@@ -4465,6 +4518,16 @@ function syncGP3DTAdvancedUI() {
     setChk('set-gp3dt-dynamic-sse', gp3dtSettings.dynamicScreenSpaceError);
     setChk('set-gp3dt-preload',     gp3dtSettings.preloadFlightDestinations);
 
+    // Reverse the exponential mapping used by updateGP3DTDetailDistance() to
+    // find the slider position that corresponds to the current density.
+    {
+        const density = Math.min(GP3DT_DETAIL_DENSITY_MAX, Math.max(GP3DT_DETAIL_DENSITY_MIN, gp3dtSettings.dynamicScreenSpaceErrorDensity));
+        const t = Math.log(density / GP3DT_DETAIL_DENSITY_MAX) / Math.log(GP3DT_DETAIL_DENSITY_MIN / GP3DT_DETAIL_DENSITY_MAX);
+        const slider = Math.round(1 + t * 99);
+        setVal('set-gp3dt-detail-distance', slider);
+        setTxt('val-gp3dt-detail-distance', _gp3dtDetailDistanceLabel(slider));
+    }
+
     settings.gp3dtRenderDistance = Math.max(600, settings.gp3dtRenderDistance || 3000); // 600m floor (guards old saved settings)
     setVal('set-gp3dt-render-distance', settings.gp3dtRenderDistance);
     setTxt('val-gp3dt-render-distance', `${Math.round(settings.gp3dtRenderDistance)} m`);
@@ -4586,201 +4649,9 @@ function tryLoadPhotorealisticTiles() {
     }
 }
 
-// ==========================================
-// 7a-1b. HYBRID MODE — WORLD TERRAIN EVERYWHERE + GP3DT ONLY AT AIRPORTS
-// ==========================================
-// mapStyle 'hybrid': the globe renders real Cesium World Terrain elevation
-// everywhere (exactly like 'cesium' style), and the Google Photorealistic
-// 3D Tileset (GP3DT) is also loaded — but clipped with a
-// Cesium.ClippingPolygonCollection so it only ever draws INSIDE a circle
-// around each airport near the camera. Everywhere else GP3DT is invisible
-// and World Terrain shows through instead.
-//
-// Height alignment: both World Terrain and GP3DT are real, elevation-
-// accurate datasets referenced to the same WGS84 ellipsoid — GP3DT's mesh
-// already sits at the true ground height, same as World Terrain's DEM — so
-// they naturally meet at the same altitude at the edge of the clip circle;
-// there's no separate "float above / sink below" offset to apply. What DOES
-// cause an apparent seam is z-fighting between the two surfaces, which is
-// why depthTestAgainstTerrain (see toggleOcclusionCulling) must stay on
-// while this mode is active — that's what's keeping GP3DT correctly in
-// front of/behind the terrain mesh at the boundary instead of flickering.
-const HYBRID_AIRPORT_RADIUS_M = 3000;  // meters — GP3DT circle radius per airport; big enough to cover the whole airfield (runways+taxiways+terminal) plus a little buffer
-const HYBRID_REFRESH_DIST_M   = 5000;  // camera must travel this far before we recompute nearby airports / rebuild the clip circles
-const HYBRID_NEARBY_RANGE_M   = 60000; // only clip in airports within this range of the camera — keeps the polygon count (and clipping cost) small
-const HYBRID_MAX_AIRPORTS     = 6;     // hard cap on simultaneous clip circles — see _hybridNearbyAirports
-
-let hybridTileset             = null;
-let _hybridMoveEndHandler     = null;
-let _hybridLastCameraPos      = null;
-let _hybridClippingBroken     = false; // set true if ClippingPolygonCollection ever fails — stops retrying (see _hybridRebuildClipping)
-
-// Builds a circle (as a polygon) of `sides` points around lat/lng at the
-// given radius in meters — used as one ClippingPolygon per nearby airport.
-function _hybridCirclePositions(lat, lng, radiusM, sides = 16) {
-    const positions = [];
-    const latRad = lat * Math.PI / 180;
-    for (let i = 0; i < sides; i++) {
-        const angle = (i / sides) * 2 * Math.PI;
-        const dLat = (radiusM * Math.cos(angle)) / 111320;
-        const dLng = (radiusM * Math.sin(angle)) / (111320 * Math.cos(latRad));
-        positions.push(Cesium.Cartesian3.fromDegrees(lng + dLng, lat + dLat));
-    }
-    return positions;
-}
-
-// Returns the airports (of any spawnable type) within HYBRID_NEARBY_RANGE_M
-// of the camera's current world position.
-function _hybridNearbyAirports() {
-    if (!cesiumViewer || typeof AirportDB === 'undefined' || !AirportDB.isLoaded()) return [];
-    const camPos  = cesiumViewer.camera.positionWC;
-    const carto   = Cesium.Cartographic.fromCartesian(camPos);
-    if (!carto) return [];
-    const lat     = Cesium.Math.toDegrees(carto.latitude);
-    const lng     = Cesium.Math.toDegrees(carto.longitude);
-    // Guard against a not-yet-settled camera (e.g. hybrid toggled a frame
-    // before the vehicle/spawn position is applied) producing NaN lat/lng,
-    // which would otherwise propagate into NaN bounds → NaN circle
-    // positions → an invalid clipping-texture size inside Cesium later on.
-    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return [];
-    const dLatDeg = HYBRID_NEARBY_RANGE_M / 111320;
-    const cosLat  = Math.cos(lat * Math.PI / 180);
-    if (Math.abs(cosLat) < 1e-6) return []; // pole edge case — avoid divide-by-near-zero
-    const dLngDeg = HYBRID_NEARBY_RANGE_M / (111320 * cosLat);
-    const types   = new Set(['large_airport', 'medium_airport', 'small_airport', 'military', 'heliport', 'seaplane_base']);
-    // Coarse bounding-box prefilter, then an exact 3D distance check (the
-    // box is rectangular in lat/lng so it over-includes at the corners).
-    const candidates = AirportDB.getByBounds(lat - dLatDeg, lng - dLngDeg, lat + dLatDeg, lng + dLngDeg, types);
-    const nearby = candidates
-        .map(ap => ({ ap, dist: Cesium.Cartesian3.distance(camPos, Cesium.Cartesian3.fromDegrees(ap.lng, ap.lat)) }))
-        .filter(x => x.dist <= HYBRID_NEARBY_RANGE_M * 1.5)
-        .sort((a, b) => a.dist - b.dist);
-    // Cap the airport count: each one becomes a 32-point clipping polygon,
-    // and ClippingPolygonCollection packs every point into a single
-    // internal texture. A dense metro area (many small/heli airports) can
-    // otherwise push the point count high enough that the computed
-    // texture dimension is invalid, which is what was crashing the
-    // renderer with "Invalid array length". 12 airports is already far
-    // more than can be visually relevant at once.
-    return nearby.slice(0, HYBRID_MAX_AIRPORTS).map(x => x.ap);
-}
-
-// Rebuilds the tileset's clipping polygons from whichever airports are
-// currently nearby. If none are nearby, the whole tileset is hidden
-// outright (cheaper than clipping to zero polygons, and avoids GP3DT
-// rendering with no clip region at all).
-function _hybridRebuildClipping() {
-    if (!hybridTileset || _hybridClippingBroken) return;
-    const nearby = _hybridNearbyAirports();
-    if (!nearby.length) {
-        hybridTileset.show = false;
-        return;
-    }
-    try {
-        const polygons = nearby.map(ap => new Cesium.ClippingPolygon({
-            positions: _hybridCirclePositions(ap.lat, ap.lng, HYBRID_AIRPORT_RADIUS_M)
-        }));
-        hybridTileset.clippingPolygons = new Cesium.ClippingPolygonCollection({
-            polygons,
-            unionClippingRegions: true, // OR the circles together into one region
-            inverse: true               // keep the INSIDE of the circles, clip (hide) everything outside
-        });
-        hybridTileset.show = true;
-        console.log(`[Hybrid] GP3DT clipped to ${nearby.length} nearby airport(s).`);
-    } catch (e) {
-        // A ClippingPolygonCollection build failure (e.g. an internal
-        // texture-size limit, or missing floating-point-texture support on
-        // this GPU/browser) used to throw all the way up as
-        // "RangeError: Invalid array length" and stop the whole Cesium
-        // renderer. Fail safe instead: drop the airport-only clipping and
-        // just show GP3DT everywhere in view (or hide it — see below) so
-        // World Terrain keeps working regardless.
-        console.warn('[Hybrid] GP3DT clipping failed, disabling airport-only clip for this session:', e);
-        hybridTileset.clippingPolygons = undefined;
-        hybridTileset.show = false;
-        _hybridClippingBroken = true; // stop retrying every moveEnd — see tryLoadHybridAirportGP3DT
-    }
-}
-
-/**
- * tryLoadHybridAirportGP3DT — loads GP3DT (same Ion asset as the full
- * Photorealistic style) but keeps it permanently clipped to circles around
- * nearby airports via _hybridRebuildClipping, and re-clips whenever the
- * camera has moved far enough that the set of "nearby" airports may have
- * changed. World Terrain + the ArcGIS/OSM globe stays visible underneath
- * and is what's actually shown away from airports.
- */
-function tryLoadHybridAirportGP3DT() {
-    if (!cesiumViewer || !CONFIG.CESIUM_ION) return;
-    if (settings.mapStyle !== 'hybrid') return;
-
-    setPhotorealStatus('Loading GP3DT for nearby airports…', 'info');
-    Cesium.Ion.defaultAccessToken = CONFIG.CESIUM_ION;
-
-    try {
-        const tilesetPromise = typeof Cesium.createGooglePhotorealistic3DTileset === 'function'
-            ? Cesium.createGooglePhotorealistic3DTileset()
-            : Cesium.Cesium3DTileset.fromIonAssetId(2275207);
-
-        Promise.resolve(tilesetPromise)
-            .then(tileset => {
-                if (!cesiumViewer || settings.mapStyle !== 'hybrid') return;
-                if (hybridTileset) cesiumViewer.scene.primitives.remove(hybridTileset);
-                cesiumViewer.scene.primitives.add(tileset);
-                hybridTileset = tileset;
-                hybridTileset.cullWithChildrenBounds = settings.occlusionCulling;
-                _hybridClippingBroken = false; // fresh tileset — give clipping another chance
-
-                const startClipping = () => {
-                    _hybridRebuildClipping();
-                    _hybridLastCameraPos = Cesium.Cartesian3.clone(cesiumViewer.camera.positionWC);
-                };
-                if (AirportDB.isLoaded()) startClipping();
-                else AirportDB.load(startClipping);
-
-                // Re-clip whenever the camera travels far enough that a
-                // different set of airports might now be nearby — this is
-                // what makes GP3DT "follow" the player from airport to
-                // airport instead of only ever appearing at the first one.
-                if (_hybridMoveEndHandler) { _hybridMoveEndHandler(); _hybridMoveEndHandler = null; }
-                _hybridMoveEndHandler = cesiumViewer.camera.moveEnd.addEventListener(() => {
-                    if (settings.mapStyle !== 'hybrid' || !hybridTileset) return;
-                    const camPos = cesiumViewer.camera.positionWC;
-                    if (_hybridLastCameraPos && Cesium.Cartesian3.distance(camPos, _hybridLastCameraPos) < HYBRID_REFRESH_DIST_M) return;
-                    _hybridLastCameraPos = Cesium.Cartesian3.clone(camPos);
-                    _hybridRebuildClipping();
-                });
-
-                setPhotorealStatus('✓ World Terrain active — GP3DT loads at nearby airports.', 'success');
-                console.log('%c🌍✈️ Hybrid mode loaded: World Terrain + airport-only GP3DT', 'color:#22c55e;font-weight:bold');
-            })
-            .catch(e => {
-                console.warn('Hybrid airport GP3DT failed to load, staying on World Terrain only:', e);
-                setPhotorealStatus(diagnosePhotorealError(e), 'error');
-            });
-    } catch (e) {
-        console.warn('Hybrid airport GP3DT init failed:', e);
-        setPhotorealStatus(diagnosePhotorealError(e), 'error');
-    }
-}
-
-// Tears down the hybrid tileset + its camera listener — called whenever a
-// different 3D style is selected so nothing stale is left in the scene.
-function _teardownHybridAirportGP3DT() {
-    if (_hybridMoveEndHandler) { _hybridMoveEndHandler(); _hybridMoveEndHandler = null; }
-    _hybridLastCameraPos = null;
-    _hybridClippingBroken = false;
-    if (hybridTileset && cesiumViewer) {
-        cesiumViewer.scene.primitives.remove(hybridTileset);
-    }
-    hybridTileset = null;
-}
-
 /**
  * set3DStyle — switches the "3D Map Style" toggle in Settings between:
  *   'cesium'    → Cesium WorldTerrain elevation + OSM Buildings footprints
- *   'hybrid'    → Cesium WorldTerrain everywhere + GP3DT clipped to circles
- *                 around nearby airports only (see tryLoadHybridAirportGP3DT)
  *   'photoreal' → Google Photorealistic 3D Tiles (Ion asset 2275207, loaded
  *                 via Cesium.createGooglePhotorealistic3DTileset() in
  *                 tryLoadPhotorealisticTiles() — that helper resolves to
@@ -4800,17 +4671,15 @@ function set3DStyle(style) {
 
     const btnCesium    = document.getElementById('btn-style-cesium');
     const btnPhotoreal = document.getElementById('btn-style-photoreal');
-    const btnHybrid    = document.getElementById('btn-style-hybrid');
     if (btnCesium)    btnCesium.classList.toggle('active', style === 'cesium');
     if (btnPhotoreal) btnPhotoreal.classList.toggle('active', style === 'photoreal');
-    if (btnHybrid)    btnHybrid.classList.toggle('active', style === 'hybrid');
 
-    // GP3DT quality tab only applies to the Photorealistic / Hybrid styles.
+    // GP3DT quality tab only applies to the Photorealistic style.
     updateSettingsTabStates();
 
     if (!cesiumViewer) return; // nothing loaded yet to tear down/swap
 
-    // Always tear down whatever the OTHER styles had already loaded first,
+    // Always tear down whatever the OTHER style had already loaded first,
     // so switching styles never leaves a stale tileset in the scene.
     if (style !== 'photoreal' && photorealTileset) {
         cesiumViewer.scene.primitives.remove(photorealTileset);
@@ -4819,9 +4688,6 @@ function set3DStyle(style) {
         if (_gp3dtGridTrimPostRenderHandler) { _gp3dtGridTrimPostRenderHandler(); _gp3dtGridTrimPostRenderHandler = null; }
         if (_gp3dtDistanceHandler) { _gp3dtDistanceHandler(); _gp3dtDistanceHandler = null; }
         _gp3dtDistanceIsFar = null;
-    }
-    if (style !== 'hybrid') {
-        _teardownHybridAirportGP3DT();
     }
 
     if (style === 'photoreal') {
@@ -4832,30 +4698,6 @@ function set3DStyle(style) {
         // Stop fetching terrain — irrelevant once the globe is hidden below.
         cesiumViewer.terrainProvider = new Cesium.EllipsoidTerrainProvider();
         tryLoadPhotorealisticTiles();
-    } else if (style === 'hybrid') {
-        // World Terrain everywhere (globe stays visible) + GP3DT clipped to
-        // circles around nearby airports only — see the block above.
-        //
-        // OSM Buildings is deliberately NOT loaded here (unlike the plain
-        // 'cesium' style below). Running World Terrain + OSM Buildings +
-        // GP3DT-with-clipping-polygons all at once turned out to overload
-        // Cesium's globe tile bookkeeping and clipping-plane budget badly
-        // enough to crash the whole renderer ("Invalid array length" inside
-        // the globe's own quadtree traversal, not our clipping code). GP3DT
-        // already draws real textured buildings at every clipped airport,
-        // so OSM's plain grey boxes would only add redundant, z-fighting
-        // geometry there anyway — same reasoning the 'photoreal' style uses.
-        if (osmBuildingsTileset) {
-            cesiumViewer.scene.primitives.remove(osmBuildingsTileset);
-            osmBuildingsTileset = null;
-            settings.osmBuildings = false;
-            const cb = document.getElementById('set-osm-buildings');
-            if (cb) cb.checked = false;
-        }
-        cesiumViewer.scene.globe.show = true;
-        setPhotorealStatus('', null);
-        tryEnableWorldTerrain();
-        tryLoadHybridAirportGP3DT();
     } else {
         cesiumViewer.scene.globe.show = true;
         setPhotorealStatus('', null);
@@ -5320,7 +5162,7 @@ function toggleFlashlight() {
  */
 function tryEnableWorldTerrain() {
     if (!cesiumViewer || !CONFIG.CESIUM_ION) { _worldTerrainReadyPromise = Promise.resolve(false); return; }
-    if (settings.mapStyle !== 'cesium' && settings.mapStyle !== 'hybrid') { _worldTerrainReadyPromise = Promise.resolve(false); return; } // skip while the Photorealistic style is active — globe is hidden, terrain would be wasted bandwidth
+    if (settings.mapStyle !== 'cesium') { _worldTerrainReadyPromise = Promise.resolve(false); return; } // skip while the Photorealistic style is active — globe is hidden, terrain would be wasted bandwidth
     try {
         Cesium.Ion.defaultAccessToken = CONFIG.CESIUM_ION;
         const terrainPromise = typeof Cesium.createWorldTerrainAsync === 'function'
@@ -5446,10 +5288,6 @@ function tryLoadOsmBuildings() {
         console.warn('OSM Buildings require a Cesium Ion token — paste one in Settings.');
         return;
     }
-    // Excludes 'hybrid' now too: running OSM Buildings alongside World
-    // Terrain + GP3DT-with-clipping in hybrid mode is what overloaded
-    // Cesium's globe tile bookkeeping and crashed the renderer — see the
-    // comment in set3DStyle()'s 'hybrid' branch.
     if (settings.mapStyle !== 'cesium') return;
     // Remove any previously loaded instance first
     if (osmBuildingsTileset) {
@@ -7806,7 +7644,7 @@ async function confirmSpawnLocation() {
     // camera buried inside it. Capped at 6s so a missing/invalid Ion
     // token can't hang the spawn screen forever — falls through to
     // whatever terrain is currently active (flat, worst case) if hit.
-    if (_worldTerrainReadyPromise && (settings.mapStyle === 'cesium' || settings.mapStyle === 'hybrid')) {
+    if (_worldTerrainReadyPromise && settings.mapStyle === 'cesium') {
         setLoadingText('Loading real terrain…');
         await Promise.race([_worldTerrainReadyPromise, new Promise(r => setTimeout(r, 6000))]);
         if (gen !== _spawnGen) return; // player cancelled/respawned elsewhere while we were waiting

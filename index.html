@@ -230,10 +230,8 @@
                     <label style="margin-top: 12px;">3D Style <span style="font-weight:400;">— only takes effect once a token below is saved</span></label>
                     <div style="display: flex; gap: 8px; margin-top: 6px; flex-wrap: wrap;">
                         <button id="btn-style-cesium" class="btn-ui" onclick="set3DStyle('cesium')" style="flex:1;">🗺️ World Terrain + OSM</button>
-                        <button id="btn-style-hybrid" class="btn-ui" onclick="set3DStyle('hybrid')" style="flex:1;">🌍✈️ Terrain + Airports GP3DT</button>
                         <button id="btn-style-photoreal" class="btn-ui active" onclick="set3DStyle('photoreal')" style="flex:1;">🌆 Google Photorealistic</button>
                     </div>
-                    <p class="desc-text" style="margin-top:6px;">"Terrain + Airports GP3DT" loads real World Terrain everywhere and only switches to Google's photorealistic 3D tiles inside a radius around whichever airport is nearby — best of both: light everywhere, ultra-detailed right where you land/takeoff.</p>
                     <label style="margin-top: 12px;">Cesium Ion Token <span style="font-weight:400;">(optional — this app already includes one)</span></label>
                     <div style="display:flex; gap:8px; margin-top:6px;">
                         <input type="text" id="cesium-token-input" placeholder="eyJhbGci..." style="flex:1; font-size:0.75rem; padding:6px;">
@@ -258,6 +256,10 @@
                     <label style="margin-top: 10px;">Maximum Screen Space Error: <span id="val-gp3dt-sse" class="desc-text">16</span></label>
                     <input type="range" id="set-gp3dt-sse" class="slider" min="2" max="64" step="2" value="16"
                            oninput="updateGP3DTAdvancedSetting('maximumScreenSpaceError', this.value); document.getElementById('val-gp3dt-sse').textContent = this.value">
+                    <label style="margin-top:12px;">🔭 GP3DT Detail Distance: <span id="val-gp3dt-detail-distance" class="desc-text">Normal</span></label>
+                    <input type="range" id="set-gp3dt-detail-distance" class="slider" min="1" max="100" step="1" value="36"
+                           oninput="updateGP3DTDetailDistance(this.value)">
+                    <p class="desc-text" style="margin-top:4px;">Controls how far away GP3DT buildings still render in full detail. Cesium normally lowers detail on distant tiles to save performance, which is why a building a kilometer away can look blank or unrendered even though it's within your render distance above. Push this slider up to keep far-away tiles sharp (uses more memory/bandwidth); pull it down to save performance and only render nearby buildings crisply.</p>
                     <label style="margin-top:12px;">Maximum Memory Usage (MB): <span id="val-gp3dt-mem" class="desc-text">2048</span></label>
                     <input type="range" id="set-gp3dt-mem" class="slider" min="512" max="4096" step="512" value="2048"
                            oninput="updateGP3DTAdvancedSetting('maximumMemoryUsage', this.value); document.getElementById('val-gp3dt-mem').textContent = this.value">
