@@ -178,6 +178,8 @@
         return {
             valid: true,
             ident: thr.ident || '',
+            course: thr.hdg,
+            distNm: distM / 1852,
             distM,
             loc: { dev: locDevDeg, dots: locDots },
             gs:  { dev: gsDevDeg,  dots: gsDots }
@@ -292,10 +294,14 @@
 
         drawAttitude(cx, cy, pitchDeg, rollDeg, hspOn);
         drawILS(cx, cy, ils);
+        drawFlightDirector(cx, cy);
         drawSpeedTape(V_CAS, mach, vmaxInfo, hspOn);
         drawAltTape(altFt, vsFpm);
         drawHeadingTape(hdgDeg);
-        drawFMA(hspOn);
+        drawFMA(hspOn, ils);
+        drawILSInfo(ils);
+        drawGroundSpeed();
+        drawSelectedBugs();
         drawBankPointer(cx, cy - 235, rollDeg, hspOn ? 40 : 67);
 
         ctx.restore();
@@ -586,12 +592,116 @@
         ctx.restore();
     }
 
-    function drawFMA(hspOn) {
+    function drawFMA(hspOn, ils) {
+        const boxW = 130, boxH = 30, y0 = 8, gap = 4;
+        const x0 = 300 - (boxW * 3 + gap * 2) / 2;
+
+        // CMD annunciation — green when at least one autopilot channel is
+        // actually flying the aircraft (mirrors autopilot.active in script.js).
+        const apOn = typeof autopilot !== 'undefined' && autopilot.active;
+        ctx.textAlign = 'center';
+        ctx.fillStyle = apOn ? COL.green : 'rgba(255,255,255,0.15)';
+        ctx.font = 'bold 15px monospace';
+        ctx.fillText('CMD', 300, 6 + boxH + 20);
+
+        const locCaptured = ils.valid && Math.abs(ils.loc.dots) < 2.5;
+        const gsCaptured  = ils.valid && Math.abs(ils.gs.dots) < 2.5;
+
+        const boxes = [
+            { label: (typeof autopilot !== 'undefined' && autopilot.spdHold) ? 'SPD' : '', sub: 'MCP SPD' },
+            { label: locCaptured ? 'LOC' : ((typeof autopilot !== 'undefined' && autopilot.hdgHold) ? 'HDG' : ''), sub: 'VOR/LOC' },
+            { label: gsCaptured ? 'G/S' : ((typeof autopilot !== 'undefined' && autopilot.altHold) ? 'ALT' : ((typeof autopilot !== 'undefined' && autopilot.vsHold) ? 'V/S' : '')), sub: 'G/S FLARE' }
+        ];
+
+        boxes.forEach((b, i) => {
+            const bx = x0 + i * (boxW + gap);
+            ctx.strokeStyle = '#4a5a68'; ctx.lineWidth = 1;
+            ctx.strokeRect(bx, y0, boxW, boxH);
+            if (b.label) {
+                ctx.fillStyle = COL.green; ctx.font = 'bold 15px monospace'; ctx.textAlign = 'center';
+                ctx.fillText(b.label, bx + boxW / 2, y0 + 20);
+            }
+            ctx.fillStyle = '#5a6a78'; ctx.font = '9px monospace'; ctx.textAlign = 'center';
+            ctx.fillText(b.sub, bx + boxW / 2, y0 + boxH + 12);
+        });
+
         ctx.textAlign = 'left'; ctx.font = 'bold 13px monospace';
         ctx.fillStyle = hspOn ? COL.red : COL.green;
         ctx.fillText(hspOn ? 'SPD PROT' : 'A/THR', 20, 24);
         ctx.fillStyle = COL.cyan;
         ctx.fillText('NORMAL LAW', 460, 24);
+    }
+
+    // Flight-director command bars — a magenta cross showing the pitch/roll
+    // the autopilot is currently commanding (autopilot._pitchCmd/_pitchCmdVS
+    // and _rollCmd, the same values that actually drive the flight physics
+    // in script.js). Hidden entirely when no AP channel is engaged, same as
+    // a real FD with no modes selected.
+    function drawFlightDirector(cx, cy) {
+        if (typeof autopilot === 'undefined' || !autopilot.active) return;
+
+        const rollCmd = autopilot._rollCmd || 0;   // roughly -1..1 stick deflection
+        const pitchCmd = autopilot.altHold ? (autopilot._pitchCmd || 0) : (autopilot._pitchCmdVS || 0);
+
+        const barHalfLen = 95;
+        const maxOffset = 90;
+        const rollBarX = cx + Math.max(-1, Math.min(1, rollCmd)) * maxOffset;
+        const pitchBarY = cy - Math.max(-1, Math.min(1, pitchCmd)) * maxOffset;
+
+        ctx.save();
+        ctx.strokeStyle = COL.magenta; ctx.lineWidth = 4; ctx.lineCap = 'round';
+
+        // vertical bar (roll command — move it left/right to command bank)
+        ctx.beginPath();
+        ctx.moveTo(rollBarX, cy - barHalfLen);
+        ctx.lineTo(rollBarX, cy + barHalfLen);
+        ctx.stroke();
+
+        // horizontal bar (pitch command — move it up/down to command pitch)
+        ctx.beginPath();
+        ctx.moveTo(cx - barHalfLen, pitchBarY);
+        ctx.lineTo(cx + barHalfLen, pitchBarY);
+        ctx.stroke();
+
+        ctx.restore();
+    }
+
+    // Small station-info block (ident/course + DME) shown top-left, like a
+    // real PFD's NAV data block, only while an ILS is actually captured.
+    function drawILSInfo(ils) {
+        if (!ils.valid) return;
+        ctx.textAlign = 'left'; ctx.font = 'bold 15px monospace';
+        ctx.fillStyle = COL.white;
+        ctx.fillText('ILS', 16, 66);
+        ctx.font = '13px monospace';
+        ctx.fillText((ils.ident || 'ILS') + ' /' + Math.round(ils.course) + '°', 16, 86);
+        ctx.fillText('DME  ' + ils.distNm.toFixed(1), 16, 104);
+    }
+
+    // Ground-speed readout, bottom-left — derived straight from state.speed
+    // (km/h ground speed, no wind model) like the sim's other HUD elements.
+    function drawGroundSpeed() {
+        if (typeof state === 'undefined') return;
+        const gsKt = Math.abs(state.speed || 0) / 1.852;
+        ctx.textAlign = 'left';
+        ctx.fillStyle = COL.cyan; ctx.font = '11px monospace';
+        ctx.fillText('GS', 16, 585);
+        ctx.fillStyle = COL.white; ctx.font = 'bold 20px monospace';
+        ctx.fillText(Math.round(gsKt).toString(), 46, 590);
+    }
+
+    // Selected-speed / selected-altitude "bugs" — the small magenta targets
+    // an FCU/MCP shows above the speed and altitude tapes, taken directly
+    // from the real autopilot.spd / autopilot.alt targets.
+    function drawSelectedBugs() {
+        if (typeof autopilot === 'undefined') return;
+        ctx.textAlign = 'center'; ctx.font = 'bold 20px monospace'; ctx.fillStyle = COL.magenta;
+        if (autopilot.spdHold) {
+            ctx.fillText(Math.round(autopilot.spd).toString(), 60, 62);
+        }
+        if (autopilot.altHold) {
+            ctx.fillText(Math.round(autopilot.alt * 100).toString(), 540, 62);
+        }
     }
 
     // ==========================================================================
