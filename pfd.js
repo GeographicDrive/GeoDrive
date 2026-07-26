@@ -34,8 +34,8 @@
 
     // ---- ILS (localizer / glideslope) --------------------------------------
     const ILS_GS_ANGLE_DEG    = 3.0;   // nominal glidepath angle
-    const ILS_GS_FULL_DEG     = 0.7;   // deviation (deg) for full-scale GS deflection
-    const ILS_LOC_FULL_DEG    = 2.5;   // deviation (deg) for full-scale LOC deflection
+    const ILS_GS_FULL_DEG     = 0.35;  // deviation (deg) for full-scale GS deflection
+    const ILS_LOC_FULL_DEG    = 1.2;   // deviation (deg) for full-scale LOC deflection
     const ILS_CAPTURE_RANGE_M = 45000; // ~24 NM, max range the receiver "sees" the beam
     const ILS_COURSE_TOLER_DEG = 100;  // how far the a/c heading may differ from the runway
                                         // course and still be considered "inbound" on it
@@ -294,7 +294,7 @@
 
         drawAttitude(cx, cy, pitchDeg, rollDeg, hspOn);
         drawILS(cx, cy, ils);
-        drawFlightDirector(cx, cy);
+        drawFlightDirector(cx, cy, ils);
         drawSpeedTape(V_CAS, mach, vmaxInfo, hspOn);
         drawAltTape(altFt, vsFpm);
         drawHeadingTape(hdgDeg);
@@ -637,16 +637,27 @@
     // and _rollCmd, the same values that actually drive the flight physics
     // in script.js). Hidden entirely when no AP channel is engaged, same as
     // a real FD with no modes selected.
-    function drawFlightDirector(cx, cy) {
-        if (typeof autopilot === 'undefined' || !autopilot.active) return;
+    function drawFlightDirector(cx, cy, ils) {
+        const apOn = typeof autopilot !== 'undefined' && autopilot.active;
+        if (!ils.valid && !apOn) return; // nothing to command — real FD would be OFF
 
-        const rollCmd = autopilot._rollCmd || 0;   // roughly -1..1 stick deflection
-        const pitchCmd = autopilot.altHold ? (autopilot._pitchCmd || 0) : (autopilot._pitchCmdVS || 0);
+        let rollCmd, pitchCmd;
+        if (ils.valid) {
+            // Fly TOWARD the deviation: same sign convention as the LOC/GS
+            // diamonds drawn in drawILS, just amplified into a bigger,
+            // more obvious pixel swing so the bars visibly steer you onto
+            // the localizer course and the 3° glidepath.
+            rollCmd  = Math.max(-1, Math.min(1, ils.loc.dots / 2.5));
+            pitchCmd = -Math.max(-1, Math.min(1, ils.gs.dots / 2.5));
+        } else {
+            rollCmd  = autopilot._rollCmd || 0;
+            pitchCmd = autopilot.altHold ? (autopilot._pitchCmd || 0) : (autopilot._pitchCmdVS || 0);
+        }
 
         const barHalfLen = 95;
-        const maxOffset = 90;
-        const rollBarX = cx + Math.max(-1, Math.min(1, rollCmd)) * maxOffset;
-        const pitchBarY = cy - Math.max(-1, Math.min(1, pitchCmd)) * maxOffset;
+        const maxOffset = 110;
+        const rollBarX = cx + rollCmd * maxOffset;
+        const pitchBarY = cy - pitchCmd * maxOffset;
 
         ctx.save();
         ctx.strokeStyle = COL.magenta; ctx.lineWidth = 4; ctx.lineCap = 'round';
