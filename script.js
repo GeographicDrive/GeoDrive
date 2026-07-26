@@ -8126,18 +8126,13 @@ const A320_SOUNDS = {
 };
 
 const a320Audio = {
-    // Non-warning callouts (altitude gates, V1, retard) are QUEUED — each
-    // one always plays start-to-finish, in the order it was triggered,
-    // never skipped and never cut off, even if several fire in the same
-    // frame (e.g. a fast descent crossing 50/40/30/20/10 almost at once).
-    normalQueue: [],
-    normalPlaying: false,
-    // Warnings (GPWS/stall/etc.) get their own fresh Audio() instance every
-    // time and are never blocked by, and never cancel, anything else — they
-    // freely overlap the normal queue AND each other, matching how a real
-    // EGPWS lets an urgent warning talk over a routine callout instead of
-    // fighting it for a single channel.
-    warnPool: [],
+    // Every callout/warning gets its own fresh Audio() instance and plays
+    // immediately on trigger — nothing is queued, nothing waits its turn.
+    // Since callouts are triggered in the order their conditions occur
+    // (e.g. altitude gates crossed 50 -> 40 -> 30 -> ...), they still START
+    // in the right order; they're simply free to overlap/layer on top of
+    // each other instead of one blocking or cutting off another.
+    activePool: [],
     playedAlts: new Set(),   // altitude gates already called out on this approach
     v1Played: false,
     prevAgl: null,
@@ -8151,59 +8146,25 @@ const a320Audio = {
 
 /**
  * playA320 — plays a callout/warning file WITHOUT ever interrupting,
- * cancelling, or cutting off anything already sounding.
- *   - warn=true  (GPWS/stall/etc.): fire-and-forget on a brand new Audio()
- *     instance, tracked in warnPool purely so it can be cleaned up when
- *     done. Freely overlaps everything else.
- *   - warn=false (altitude callouts, V1, retard-as-non-warning callers):
- *     pushed onto normalQueue and drained one at a time by
- *     processA320NormalQueue(), so a burst of calls in a single frame (or
- *     across frames while a prior one is still playing) is guaranteed to
- *     be heard in full, in order, rather than the old behaviour of
- *     silently dropping any callout that arrived while the shared channel
- *     was busy.
+ * cancelling, cutting off, or waiting on anything already sounding. Every
+ * call gets a brand new Audio() instance, so any number of callouts and
+ * warnings can be audibly layered/overlapping at once (e.g. a fast
+ * descent's "50", "40", "30"... plus a RETARD warning cutting across all
+ * of them) — none of them ever silences another.
  */
 function playA320(key, warn) {
     const file = A320_SOUNDS[key];
     if (!file) return;
-    if (warn) {
-        const audio = new Audio(A320_AUDIO_PATH + file);
-        audio.volume = 1.0;
-        a320Audio.warnPool.push(audio);
-        const cleanup = () => {
-            const i = a320Audio.warnPool.indexOf(audio);
-            if (i !== -1) a320Audio.warnPool.splice(i, 1);
-        };
-        audio.addEventListener('ended', cleanup);
-        audio.addEventListener('error', cleanup);
-        audio.play().catch(cleanup);
-    } else {
-        a320Audio.normalQueue.push(file);
-        processA320NormalQueue();
-    }
-}
-
-/**
- * processA320NormalQueue — drains a320Audio.normalQueue one file at a
- * time. Only ever one "normal" callout audibly playing at once (so e.g.
- * "50" and "40" aren't garbled on top of each other), but nothing is ever
- * skipped: each queued file waits its turn and gets to finish, so a rapid
- * "50 -> 40 -> 30 -> 20 -> 10 -> 5" descent is heard in full, in order.
- */
-function processA320NormalQueue() {
-    if (a320Audio.normalPlaying) return;
-    const file = a320Audio.normalQueue.shift();
-    if (!file) return;
-    a320Audio.normalPlaying = true;
     const audio = new Audio(A320_AUDIO_PATH + file);
-    audio.volume = 0.9;
-    const advance = () => {
-        a320Audio.normalPlaying = false;
-        processA320NormalQueue();
+    audio.volume = warn ? 1.0 : 0.9;
+    a320Audio.activePool.push(audio);
+    const cleanup = () => {
+        const i = a320Audio.activePool.indexOf(audio);
+        if (i !== -1) a320Audio.activePool.splice(i, 1);
     };
-    audio.addEventListener('ended', advance);
-    audio.addEventListener('error', advance); // a missing/broken file can't jam the queue
-    audio.play().catch(advance);
+    audio.addEventListener('ended', cleanup);
+    audio.addEventListener('error', cleanup);
+    audio.play().catch(cleanup);
 }
 
 function resetA320Approach() {
