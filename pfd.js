@@ -32,6 +32,14 @@
     const VFE_FULL  = 177;   // KIAS with flaps down (we only have a binary flap flag)
     const VFE_CLEAN = VMO;
 
+    // ---- ILS (localizer / glideslope) --------------------------------------
+    const ILS_GS_ANGLE_DEG    = 3.0;   // nominal glidepath angle
+    const ILS_GS_FULL_DEG     = 0.7;   // deviation (deg) for full-scale GS deflection
+    const ILS_LOC_FULL_DEG    = 2.5;   // deviation (deg) for full-scale LOC deflection
+    const ILS_CAPTURE_RANGE_M = 45000; // ~24 NM, max range the receiver "sees" the beam
+    const ILS_COURSE_TOLER_DEG = 100;  // how far the a/c heading may differ from the runway
+                                        // course and still be considered "inbound" on it
+
     // ---- ISA atmosphere ----------------------------------------------------
     function isaStaticPressurePa(altM) {
         if (altM <= 11000) {
@@ -104,6 +112,76 @@
         HSP.active = V_CAS >= HSP.vProt;
         HSP.bankLimit = HSP.active ? 40 : 67;
         HSP.overspeedAmount = HSP.active ? (V_CAS - HSP.vProt) : 0;
+    }
+
+    // ---- ILS: localizer + glideslope deviation -----------------------------
+    // Uses the real, currently-active runway (_activeRunway, populated from
+    // RunwayDB in script.js) as the ILS ground station: the runway threshold
+    // is the localizer antenna position and its published heading is the
+    // extended runway centerline (course). This is genuinely derived from
+    // the aircraft's own lat/lng/altitude vs. that geometry, not hand-set.
+    function angDiffDeg(a, b) {
+        let d = (a - b) % 360;
+        if (d > 180) d -= 360; else if (d < -180) d += 360;
+        return d;
+    }
+
+    // Picks whichever runway end the aircraft is currently flying toward
+    // (its heading roughly matches that end's published approach course),
+    // returning null if there's no active runway or nothing lines up.
+    function selectILSThreshold() {
+        if (!_activeRunway || typeof state === 'undefined') return null;
+        const rwy = _activeRunway;
+        const ends = [
+            { lat: rwy.leLat, lng: rwy.leLng, hdg: rwy.leHdg, elevFt: rwy.leElev, ident: rwy.leIdent },
+            { lat: rwy.heLat, lng: rwy.heLng, hdg: rwy.heHdg, elevFt: rwy.heElev, ident: rwy.heIdent }
+        ].filter(e => typeof e.lat === 'number' && typeof e.lng === 'number' &&
+                      typeof e.hdg === 'number' && !isNaN(e.hdg));
+        if (!ends.length) return null;
+
+        let best = null, bestErr = Infinity;
+        for (const e of ends) {
+            const err = Math.abs(angDiffDeg(state.heading || 0, e.hdg));
+            if (err < bestErr) { bestErr = err; best = e; }
+        }
+        if (!best || bestErr > ILS_COURSE_TOLER_DEG) return null;
+        return best;
+    }
+
+    // Returns { valid, loc: {dev, dots, capturedFlag}, gs: {dev, dots, capturedFlag}, ident }
+    // dev is in degrees (signed), dots is dev/fullScale clamped to ±2.5 for display.
+    function computeILS(altFt) {
+        const thr = selectILSThreshold();
+        if (!thr) return { valid: false };
+
+        const distM = _haversineMeters(state.lat, state.lng, thr.lat, thr.lng);
+        if (distM > ILS_CAPTURE_RANGE_M || distM < 5) return { valid: false };
+
+        // Localizer: angle between the bearing FROM the aircraft TO the
+        // threshold and the runway's own extended-centerline course.
+        // On centerline these coincide (dev ≈ 0); left of course the
+        // bearing-to-threshold reads lower  → dev negative (fly right);
+        // right of course it reads higher → dev positive (fly left).
+        const bearingToThreshold = _bearingDegrees(state.lat, state.lng, thr.lat, thr.lng);
+        const locDevDeg = angDiffDeg(bearingToThreshold, thr.hdg);
+        const locDots = Math.max(-2.5, Math.min(2.5, locDevDeg / ILS_LOC_FULL_DEG));
+
+        // Glideslope: compare the aircraft's actual vertical angle down to
+        // the threshold against the nominal 3° glidepath.
+        const thrElevFt = (typeof thr.elevFt === 'number' && !isNaN(thr.elevFt)) ? thr.elevFt : 0;
+        const heightAglFt = Math.max(0, altFt - thrElevFt);
+        const heightAglM = heightAglFt * 0.3048;
+        const actualAngleDeg = Math.atan2(heightAglM, distM) * 180 / Math.PI;
+        const gsDevDeg = actualAngleDeg - ILS_GS_ANGLE_DEG; // + = above path (fly down), - = below (fly up)
+        const gsDots = Math.max(-2.5, Math.min(2.5, gsDevDeg / ILS_GS_FULL_DEG));
+
+        return {
+            valid: true,
+            ident: thr.ident || '',
+            distM,
+            loc: { dev: locDevDeg, dots: locDots },
+            gs:  { dev: gsDevDeg,  dots: gsDots }
+        };
     }
 
     // ==========================================================================
@@ -205,7 +283,7 @@
         magenta: '#ff2fd6', cyan: '#00e0ff', black: '#000'
     };
 
-    function draw(pitchDeg, rollDeg, V_CAS, mach, altFt, vsFpm, hdgDeg, vmaxInfo, hspOn) {
+    function draw(pitchDeg, rollDeg, V_CAS, mach, altFt, vsFpm, hdgDeg, vmaxInfo, hspOn, ils) {
         const W = canvas.width, H = canvas.height;
         const cx = W / 2, cy = H / 2;
         ctx.clearRect(0, 0, W, H);
@@ -213,6 +291,7 @@
         ctx.beginPath(); ctx.rect(0, 0, W, H); ctx.clip();
 
         drawAttitude(cx, cy, pitchDeg, rollDeg, hspOn);
+        drawILS(cx, cy, ils);
         drawSpeedTape(V_CAS, mach, vmaxInfo, hspOn);
         drawAltTape(altFt, vsFpm);
         drawHeadingTape(hdgDeg);
@@ -440,6 +519,73 @@
         ctx.fillText(String(Math.round(hdgDeg)).padStart(3, '0') + '°', xc, y0 + h / 2 + 16);
     }
 
+    function drawILS(cx, cy, ils) {
+        const R = 260;
+        const dotSpacing = 26;   // px between dots (2 dots either side of center + center)
+        ctx.save();
+
+        // ---- Glideslope: vertical scale on the right side of the ADI -------
+        const gsX = cx + R - 20;
+        const gsTop = cy - 2 * dotSpacing - 10, gsBot = cy + 2 * dotSpacing + 10;
+        ctx.strokeStyle = COL.white; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.moveTo(gsX, gsTop); ctx.lineTo(gsX, gsBot); ctx.stroke();
+        [-2, -1, 1, 2].forEach(n => {
+            const y = cy + n * dotSpacing;
+            ctx.beginPath(); ctx.arc(gsX, y, 3.5, 0, Math.PI * 2);
+            ctx.strokeStyle = COL.white; ctx.stroke();
+        });
+        // center fixed reference (small amber box, the aircraft's own position on the scale)
+        ctx.strokeStyle = COL.amber; ctx.lineWidth = 2;
+        ctx.strokeRect(gsX - 9, cy - 9, 18, 18);
+
+        if (ils.valid) {
+            // dev>0 = above path (fly down) -> diamond appears ABOVE center per convention is
+            // reversed on real ADIs (diamond shows where the beam is relative to the a/c: a
+            // high a/c sees the diamond low, prompting a "fly down" correction).
+            const gsY = cy - Math.max(-2.2, Math.min(2.2, ils.gs.dots)) * dotSpacing;
+            ctx.fillStyle = COL.magenta;
+            ctx.beginPath();
+            ctx.moveTo(gsX, gsY - 8); ctx.lineTo(gsX + 8, gsY);
+            ctx.lineTo(gsX, gsY + 8); ctx.lineTo(gsX - 8, gsY); ctx.closePath();
+            ctx.fill();
+        } else {
+            ctx.fillStyle = COL.red; ctx.font = 'bold 14px monospace'; ctx.textAlign = 'left';
+            ctx.fillText('GS', gsX + 14, cy + 5);
+        }
+
+        // ---- Localizer: horizontal scale below the ADI ----------------------
+        const locY = cy + R - 20;
+        const locLeft = cx - 2 * dotSpacing - 10, locRight = cx + 2 * dotSpacing + 10;
+        ctx.strokeStyle = COL.white; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.moveTo(locLeft, locY); ctx.lineTo(locRight, locY); ctx.stroke();
+        [-2, -1, 1, 2].forEach(n => {
+            const x = cx + n * dotSpacing;
+            ctx.beginPath(); ctx.arc(x, locY, 3.5, 0, Math.PI * 2);
+            ctx.strokeStyle = COL.white; ctx.stroke();
+        });
+        ctx.strokeStyle = COL.amber; ctx.lineWidth = 2;
+        ctx.strokeRect(cx - 9, locY - 9, 18, 18);
+
+        if (ils.valid) {
+            // dev>0 = a/c right of course -> diamond shows to the right, prompting "fly left".
+            const locX = cx + Math.max(-2.2, Math.min(2.2, ils.loc.dots)) * dotSpacing;
+            ctx.fillStyle = COL.magenta;
+            ctx.beginPath();
+            ctx.moveTo(locX - 8, locY); ctx.lineTo(locX, locY - 8);
+            ctx.lineTo(locX + 8, locY); ctx.lineTo(locX, locY + 8); ctx.closePath();
+            ctx.fill();
+
+            ctx.fillStyle = COL.cyan; ctx.font = '11px monospace'; ctx.textAlign = 'left';
+            ctx.fillText('ILS ' + (ils.ident || '') + '  ' + (ils.distM / 1852).toFixed(1) + ' NM',
+                         cx - R + 10, cy + R - 4);
+        } else {
+            ctx.fillStyle = COL.red; ctx.font = 'bold 14px monospace'; ctx.textAlign = 'center';
+            ctx.fillText('LOC', cx, locY + 26);
+        }
+
+        ctx.restore();
+    }
+
     function drawFMA(hspOn) {
         ctx.textAlign = 'left'; ctx.font = 'bold 13px monospace';
         ctx.fillStyle = hspOn ? COL.red : COL.green;
@@ -497,8 +643,10 @@
                     smoothedHeading = (smoothedHeading + diff * 0.35 + 360) % 360;
                 }
 
+                const ils = computeILS(altFt);
+
                 draw(pitchDeg, rollDeg, cas, mach, altFt, vsFpm,
-                     smoothedHeading, vmaxInfo, HSP.active);
+                     smoothedHeading, vmaxInfo, HSP.active, ils);
 
                 footerEls.vmax.textContent = 'VMAX ' + Math.round(vmaxInfo.vmax) + ' KT';
                 footerEls.hsp.className = HSP.active ? 'pfd-warn' : '';
