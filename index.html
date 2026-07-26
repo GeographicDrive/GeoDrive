@@ -651,28 +651,45 @@
         <input type="range" id="flight-yaw-slider" min="-1" max="1" step="0.05" value="0" style="display:none;">
 
         <div id="flight-buttons">
-            <div class="btn-group" style="flex-direction: column; align-items: center; gap: 5px; padding: 5px 0;">
-                <label style="color: white; font-size: 10px; font-weight: bold; letter-spacing: 0.5px;">THROTTLE</label>
-                <div class="vertical-slider-wrap">
-                    <input type="range" id="flight-throttle-slider" min="0" max="100" value="0" style="display:none;">
-                </div>
-                <!-- Realistic throttle quadrant: gated lever with detents at IDLE / CL / FLX-MCT / TOGA.
-                     Purely visual + touch layer on top of the original hidden #flight-throttle-slider,
-                     which stays the single source of truth for flight.throttle so all existing
-                     script.js logic (reset-on-vehicle-change, gamepad axis, autopilot, etc.) keeps
-                     working untouched. -->
-                <div id="throttle-quadrant" title="Drag the lever. Smooth from IDLE to CL, clicks into CL / FLX-MCT / TOGA above that.">
-                    <div id="throttle-track">
-                        <!-- background is throttlebase.png (real photo, cropped) -->
-                        <div class="tq-notch" id="tq-notch-toga"></div>
-                        <div class="tq-notch" id="tq-notch-flx"></div>
-                        <div class="tq-notch" id="tq-notch-cl"></div>
+            <div class="btn-group" style="align-items: center; gap: 12px; padding: 5px 0;">
+                <!-- A320 THS trim wheel — left of the throttle. 2D black/white
+                     "cylinder" clipped to a small viewport (see #trim-wheel-viewport
+                     in style.css and setupTrimWheel()/renderTrimWheel() in
+                     script.js): dragging vertically scrolls the (much taller than
+                     the viewport) striped cylinder behind the fixed yellow pointer,
+                     giving the illusion of a large wheel rotating in 3D while only
+                     ever rendering the visible slice. -->
+                <div style="display:flex; flex-direction: column; align-items: center; gap: 5px;">
+                    <label style="color: white; font-size: 10px; font-weight: bold; letter-spacing: 0.5px;">TRIM</label>
+                    <div id="trim-wheel-viewport" title="Drag vertically to trim the THS — up for nose-up, down for nose-down">
+                        <div id="trim-wheel-cylinder"></div>
+                        <div id="trim-wheel-pointer"></div>
                     </div>
-                    <div id="throttle-handle">
-                        <img src="throttle.png" alt="" draggable="false">
-                    </div>
+                    <span id="trim-wheel-val" style="color: #ffb400; font-size: 10px; font-weight: bold;">▲UP 0.0°</span>
                 </div>
-                <span id="flight-throttle-val" style="color: #22c55e; font-size: 11px; font-weight: bold;">0%</span>
+                <div style="display:flex; flex-direction: column; align-items: center; gap: 5px;">
+                    <label style="color: white; font-size: 10px; font-weight: bold; letter-spacing: 0.5px;">THROTTLE</label>
+                    <div class="vertical-slider-wrap">
+                        <input type="range" id="flight-throttle-slider" min="0" max="100" value="0" style="display:none;">
+                    </div>
+                    <!-- Realistic throttle quadrant: gated lever with detents at IDLE / CL / FLX-MCT / TOGA.
+                         Purely visual + touch layer on top of the original hidden #flight-throttle-slider,
+                         which stays the single source of truth for flight.throttle so all existing
+                         script.js logic (reset-on-vehicle-change, gamepad axis, autopilot, etc.) keeps
+                         working untouched. -->
+                    <div id="throttle-quadrant" title="Drag the lever. Smooth from IDLE to CL, clicks into CL / FLX-MCT / TOGA above that.">
+                        <div id="throttle-track">
+                            <!-- background is throttlebase.png (real photo, cropped) -->
+                            <div class="tq-notch" id="tq-notch-toga"></div>
+                            <div class="tq-notch" id="tq-notch-flx"></div>
+                            <div class="tq-notch" id="tq-notch-cl"></div>
+                        </div>
+                        <div id="throttle-handle">
+                            <img src="throttle.png" alt="" draggable="false">
+                        </div>
+                    </div>
+                    <span id="flight-throttle-val" style="color: #22c55e; font-size: 11px; font-weight: bold;">0%</span>
+                </div>
             </div>
             <div class="btn-group">
                 <button id="btn-flight-brake" class="action-btn">BRAKE</button>

@@ -2995,7 +2995,18 @@ class AdvancedFlightDynamics {
 
         const CY = this.aero.CYb * beta + this.aero.CYp * (p * this.b / (2 * VT)) + this.aero.CYdr * delta_r;
         const Cl = this.aero.Clb * beta + this.aero.Clp * (p * this.b / (2 * VT)) + this.aero.Clda * delta_a;
-        const Cm = this.aero.Cm0 + this.aero.Cma * alpha + this.aero.Cmq * (q * this.c / (2 * VT)) + this.aero.Cmde * delta_e;
+        // THS (Trimmable Horizontal Stabilizer) trim contribution — folded
+        // into the pitching-moment coefficient exactly like the elevator
+        // term above (Cmde * delta_e), so it scales with dynamic pressure
+        // the same physically-correct way: M_trim = q_inf*S*c*(Cmdt*delta_ths),
+        // matching M = M_elevator + M_trim from the trim-wheel spec, just
+        // expressed as coefficients (consistent with every other term in
+        // this equation) rather than as a bare, speed-independent number.
+        // delta_ths is in DEGREES (not radians, unlike delta_e) to match
+        // the 0.12-per-degree gain given in that spec.
+        const delta_ths = controls.delta_ths || 0;
+        const Cm = this.aero.Cm0 + this.aero.Cma * alpha + this.aero.Cmq * (q * this.c / (2 * VT)) + this.aero.Cmde * delta_e
+                 + (this.aero.Cmdt || 0) * delta_ths;
         const Cn = this.aero.Cnb * beta + this.aero.Cnp * (p * this.b / (2 * VT)) + this.aero.Cnr * (r * this.b / (2 * VT)) + this.aero.Cndr * delta_r;
 
         const F_ax = q_inf * this.S * CX;
@@ -3176,6 +3187,12 @@ const FLIGHT_CONFIGS = {
             CYb: -0.45, CYp: 0.0, CYdr: 0.12,
             Clb: -0.09, Clp: -0.35, Clda: 0.11,
             Cm0: 0.0, Cma: -1.3, Cmq: -18, Cmde: -1.5,
+            // Trim-tab effectiveness of the THS, per DEGREE of stabilizer
+            // deflection (see Cmdt usage above and the trim-wheel spec:
+            // M_trim = 0.12 * THS). Positive THS (nose-up trim, up to
+            // +13.5°) must produce a nose-up (positive) Cm, same sense as
+            // a nose-up elevator command.
+            Cmdt: 0.12,
             Cnb: 0.14, Cnp: -0.015, Cnr: -0.28, Cndr: -0.09
         },
         prop: {
@@ -3488,8 +3505,54 @@ const flight = {
     verticalSpeed: 0,
     gearDown: true, brakeActive: false, reverseActive: false, flapsDown: false,
     groundRef: null,  // real terrain elevation (m) flight.alt is measured from; re-locked near the ground, frozen while airborne — see updateCesiumCamera
-    rudderDeflection: 0  // deg, actuator-modeled rudder surface position — see RUDDER (RTLU) block in updateFlight()
+    rudderDeflection: 0,  // deg, actuator-modeled rudder surface position — see RUDDER (RTLU) block in updateFlight()
+    ths: 0  // deg, THS (Trimmable Horizontal Stabilizer) position, -4 (nose-down) .. +13.5 (nose-up) — see TRIM block in updateFlight() and setupTrimWheel()
 };
+
+// ── THS (Trimmable Horizontal Stabilizer) trim system ───────────────────
+// Range/rate constants straight from the A320 trim-wheel spec:
+//   THS = -4 + (turns/12) * 17.5     (turns: 0..12 wheel rotations)
+//   1 wheel turn  = 17.5/12 = 1.4583° THS
+//   THS clamped to [-4°, +13.5°], moves at <= 0.7°/s (manual or autotrim)
+const THS_MIN = -4, THS_MAX = 13.5, THS_RANGE = THS_MAX - THS_MIN; // 17.5°
+const THS_DEG_PER_TURN = THS_RANGE / 12; // 1.4583° per full wheel rotation
+const THS_MAX_RATE = 0.7; // deg/s, shared by manual wheel input AND autotrim
+
+// trimWheel — drag state for the physical wheel widget (see setupTrimWheel).
+// While dragging, the pilot's hand is the authority (manualTarget), and
+// autotrim is suspended — exactly like the real aircraft, where manually
+// rotating the trim wheel overrides/disconnects the electric trim motor.
+const trimWheel = { dragging: false, manualTarget: 0 };
+
+/**
+ * updateThsTrim — advances flight.ths toward a target position at no more
+ * than THS_MAX_RATE (0.7°/s), so the stabilizer NEVER jumps instantly —
+ * whether that target comes from the pilot dragging the wheel by hand, or
+ * from autotrim.
+ *
+ * Autotrim (Normal Law): THS_target = THS + 0.03 * delta_e, continuously
+ * chasing whatever elevator deflection is currently commanded. As THS
+ * moves, it progressively unloads the elevator (delta_e -> 0), which is
+ * exactly what a real A320 autotrim does: it flies the trim wheel so the
+ * pilot doesn't have to hold sustained stick pressure.
+ */
+function updateThsTrim(dt, delta_e_rad) {
+    let target;
+    if (trimWheel.dragging) {
+        target = trimWheel.manualTarget;
+    } else {
+        // Sign convention: elevator delta_e is stored nose-up-negative (see
+        // "Elevator sign convention" note in updateFlight), so flip it back
+        // to a nose-up-positive delta_e for this formula.
+        const delta_e_deg = -delta_e_rad * 180 / Math.PI;
+        target = flight.ths + 0.03 * delta_e_deg;
+    }
+    target = Math.max(THS_MIN, Math.min(THS_MAX, target));
+
+    const maxStep = THS_MAX_RATE * dt;
+    const step = Math.max(-maxStep, Math.min(maxStep, target - flight.ths));
+    flight.ths = Math.max(THS_MIN, Math.min(THS_MAX, flight.ths + step));
+}
 const flightInput = { pitch: 0, roll: 0, yaw: 0 };
 let flightJoystickActive = false;
 // Tiller (nosewheel steering) input, -1 (full left) .. +1 (full right).
@@ -3793,6 +3856,88 @@ function setupFlightRudder(containerId, trackId, knobId) {
     container.addEventListener('pointercancel', release);
 }
 setupFlightRudder('flight-rudder-container', 'flight-rudder-track', 'flight-rudder-knob');
+
+/**
+ * setupTrimWheel — A320-style THS trim wheel. Visually it's a tall
+ * black/white striped "cylinder" div (many multiples of the small visible
+ * viewport) positioned with a CSS transform and clipped by `overflow:
+ * hidden` on its container; dragging vertically translates that cylinder,
+ * which reads as a big wheel rotating in place when only a thin slice of
+ * it is ever shown. Only that one transform is touched per frame (see
+ * renderTrimWheel below), so this is effectively free no matter how many
+ * "turns" the wheel notionally spans.
+ *
+ * Dragging sets trimWheel.manualTarget directly (pixels -> wheel turns ->
+ * degrees THS, via THS_DEG_PER_TURN) and flags trimWheel.dragging so
+ * updateThsTrim() lets the hand take over from autotrim; the actual
+ * flight.ths value still only ever moves at <= THS_MAX_RATE, so a fast
+ * flick of the wheel still eases the stabilizer in with the same
+ * mechanical "weight" as autotrim does, instead of snapping.
+ */
+const TRIM_PX_PER_TURN = 240; // px of cylinder scroll per full wheel rotation
+
+function setupTrimWheel(viewportId, cylinderId) {
+    const viewport = document.getElementById(viewportId);
+    const cylinder = document.getElementById(cylinderId);
+    if (!viewport || !cylinder) return;
+
+    let activePointerId = null;
+    let startY = 0, startThs = 0;
+
+    viewport.addEventListener('pointerdown', (e) => {
+        if (activePointerId !== null) return;
+        activePointerId = e.pointerId;
+        viewport.setPointerCapture(e.pointerId);
+        startY = e.clientY;
+        startThs = flight.ths;
+        trimWheel.manualTarget = flight.ths;
+        trimWheel.dragging = true;
+    });
+
+    viewport.addEventListener('pointermove', (e) => {
+        if (e.pointerId !== activePointerId) return;
+        // Dragging UP (dy negative) = rotating the wheel like pulling its
+        // top toward the pilot = nose-up trim, matching the real aircraft.
+        const dy = e.clientY - startY;
+        const turnsDelta = -dy / TRIM_PX_PER_TURN;
+        const thsDelta = turnsDelta * THS_DEG_PER_TURN;
+        trimWheel.manualTarget = Math.max(THS_MIN, Math.min(THS_MAX, startThs + thsDelta));
+    });
+
+    function release(e) {
+        if (e.pointerId !== activePointerId) return;
+        activePointerId = null;
+        trimWheel.dragging = false;
+    }
+    viewport.addEventListener('pointerup', release);
+    viewport.addEventListener('pointercancel', release);
+}
+setupTrimWheel('trim-wheel-viewport', 'trim-wheel-cylinder');
+
+/**
+ * renderTrimWheel — every frame, positions the cylinder so the stripe
+ * matching the current flight.ths sits centered under the fixed pointer
+ * line, and updates the numeric readout. Runs on its own rAF loop (rather
+ * than piggy-backing on updateFlight) so the wheel keeps rendering smoothly
+ * even independent of physics-tick timing, same as the rest of the UI.
+ */
+function renderTrimWheel() {
+    const cylinder = document.getElementById('trim-wheel-cylinder');
+    const viewport = document.getElementById('trim-wheel-viewport');
+    const valEl = document.getElementById('trim-wheel-val');
+    if (cylinder && viewport) {
+        const turns = (flight.ths - THS_MIN) / THS_RANGE * 12; // 0..12
+        const offsetPx = turns * TRIM_PX_PER_TURN;
+        const centered = offsetPx - viewport.clientHeight / 2;
+        cylinder.style.transform = `translateY(${-centered}px)`;
+    }
+    if (valEl) {
+        const arrow = flight.ths >= 0 ? '▲UP' : '▼DN';
+        valEl.textContent = `${arrow} ${Math.abs(flight.ths).toFixed(1)}°`;
+    }
+    requestAnimationFrame(renderTrimWheel);
+}
+requestAnimationFrame(renderTrimWheel);
 
 /**
  * setupFlightTiller — real-aircraft-style tiller knob (see tiller.png).
@@ -4175,6 +4320,14 @@ function updateFlight(dt) {
         reverseActive: flight.reverseActive,
         flapsDown: flight.flapsDown
     };
+
+    // ── TRIM (A320 THS) ──────────────────────────────────────────────────
+    // Advance the stabilizer toward its target (manual wheel drag, or
+    // autotrim unloading the elevator) at the shared 0.7°/s rate limit,
+    // then feed the resulting position into the moment equation as
+    // delta_ths, right alongside delta_e above (see Cmdt in calculateDerivatives).
+    updateThsTrim(dt, controls.delta_e);
+    controls.delta_ths = flight.ths; // degrees
 
     // x,y accumulate NED displacement each step; we translate it into
     // lat/lng ourselves and reset it so it doesn't grow unbounded (position

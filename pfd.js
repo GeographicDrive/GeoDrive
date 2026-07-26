@@ -37,6 +37,8 @@
     const ILS_GS_FULL_DEG     = 0.35;  // deviation (deg) for full-scale GS deflection
     const ILS_LOC_FULL_DEG    = 1.2;   // deviation (deg) for full-scale LOC deflection
     const ILS_CAPTURE_RANGE_M = 45000; // ~24 NM, max range the receiver "sees" the beam
+    const ILS_MIN_REF_DIST_M  = 600;   // floor distance used for LOC/GS scaling, so the
+                                        // needles don't snap to full-scale right at the threshold
     const ILS_COURSE_TOLER_DEG = 100;  // how far the a/c heading may differ from the runway
                                         // course and still be considered "inbound" on it
 
@@ -157,22 +159,32 @@
         const distM = _haversineMeters(state.lat, state.lng, thr.lat, thr.lng);
         if (distM > ILS_CAPTURE_RANGE_M || distM < 5) return { valid: false };
 
-        // Localizer: angle between the bearing FROM the aircraft TO the
-        // threshold and the runway's own extended-centerline course.
-        // On centerline these coincide (dev ≈ 0); left of course the
-        // bearing-to-threshold reads lower  → dev negative (fly right);
-        // right of course it reads higher → dev positive (fly left).
+        // Localizer: convert to an actual lateral offset from the extended
+        // centerline (meters), then compare that against a reference beam
+        // half-width. We floor the distance used for the reference width at
+        // ILS_MIN_REF_DIST_M — otherwise, right over the threshold, a tiny
+        // real offset gets divided by an almost-zero distance and the
+        // needle/cross snaps instantly to full-scale. Real ILS receivers
+        // effectively do the same (they stop narrowing the useable course
+        // width once you're that close in).
         const bearingToThreshold = _bearingDegrees(state.lat, state.lng, thr.lat, thr.lng);
         const locDevDeg = angDiffDeg(bearingToThreshold, thr.hdg);
-        const locDots = Math.max(-2.5, Math.min(2.5, locDevDeg / ILS_LOC_FULL_DEG));
+        const crossTrackM = distM * Math.sin(locDevDeg * Math.PI / 180);
+        const locRefDistM = Math.max(distM, ILS_MIN_REF_DIST_M);
+        const locFullScaleWidthM = locRefDistM * Math.tan(ILS_LOC_FULL_DEG * Math.PI / 180);
+        const locDots = Math.max(-2.5, Math.min(2.5, crossTrackM / locFullScaleWidthM));
 
-        // Glideslope: compare the aircraft's actual vertical angle down to
-        // the threshold against the nominal 3° glidepath.
+        // Glideslope: same idea — work from the actual height error (meters)
+        // above/below the ideal 3° path, referenced against a floored
+        // distance so it doesn't explode into full-scale right at the
+        // threshold either.
         const thrElevFt = (typeof thr.elevFt === 'number' && !isNaN(thr.elevFt)) ? thr.elevFt : 0;
         const heightAglFt = Math.max(0, altFt - thrElevFt);
         const heightAglM = heightAglFt * 0.3048;
-        const actualAngleDeg = Math.atan2(heightAglM, distM) * 180 / Math.PI;
-        const gsDevDeg = actualAngleDeg - ILS_GS_ANGLE_DEG; // + = above path (fly down), - = below (fly up)
+        const idealHeightM = distM * Math.tan(ILS_GS_ANGLE_DEG * Math.PI / 180);
+        const heightErrorM = heightAglM - idealHeightM; // + = above path (fly down), - = below (fly up)
+        const gsRefDistM = Math.max(distM, ILS_MIN_REF_DIST_M);
+        const gsDevDeg = Math.atan2(heightErrorM, gsRefDistM) * 180 / Math.PI;
         const gsDots = Math.max(-2.5, Math.min(2.5, gsDevDeg / ILS_GS_FULL_DEG));
 
         return {

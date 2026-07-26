@@ -437,6 +437,65 @@ button.danger { background: var(--danger); }
     pointer-events: none;
 }
 
+/* Trim wheel — A320-style THS (Trimmable Horizontal Stabilizer) control.
+   A small clipped viewport (overflow: hidden) shows only a thin centered
+   slice of a MUCH taller black/white striped "cylinder" div (12 full
+   turns tall — see #trim-wheel-cylinder height and TRIM_PX_PER_TURN in
+   script.js). Dragging vertically translates that cylinder behind the
+   fixed viewport, which is the classic trick for faking a big wheel
+   rotating in 3D while viewed edge-on in a flat 2D UI. Since only the one
+   transform ever changes, only the currently-visible slice is ever
+   repainted — cheap no matter how tall the notional wheel is. */
+#trim-wheel-viewport {
+    position: relative;
+    width: 28px;
+    height: 110px;
+    overflow: hidden;
+    border-radius: 4px;
+    border: 1px solid #1e293b;
+    background: #0b0e12;
+    box-shadow: inset 0 2px 6px rgba(0,0,0,0.6);
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+}
+#trim-wheel-viewport:active { cursor: grabbing; }
+#trim-wheel-cylinder {
+    position: absolute;
+    left: 0; top: 0;
+    width: 100%;
+    height: 2880px; /* 12 turns x 240px/turn (TRIM_PX_PER_TURN in script.js) */
+    background: repeating-linear-gradient(
+        to bottom,
+        #f2f2f2 0px, #f2f2f2 9px,
+        #101214 9px, #101214 20px
+    );
+    will-change: transform;
+}
+/* Vignette so the black/white stripes fade out near the top/bottom edges
+   of the viewport, as if wrapping around and out of view like a real
+   cylinder viewed from the side rather than a flat scrolling strip. */
+#trim-wheel-viewport::before {
+    content: '';
+    position: absolute; inset: 0;
+    background: linear-gradient(to bottom,
+        rgba(0,0,0,0.8) 0%, rgba(0,0,0,0) 32%,
+        rgba(0,0,0,0) 68%, rgba(0,0,0,0.8) 100%);
+    pointer-events: none;
+    z-index: 2;
+}
+/* Fixed reference pointer — the wheel scrolls underneath this line. */
+#trim-wheel-pointer {
+    position: absolute;
+    left: -2px; right: -2px; top: 50%;
+    height: 2px;
+    margin-top: -1px;
+    background: #ffb400;
+    box-shadow: 0 0 3px rgba(255,180,0,0.9);
+    pointer-events: none;
+    z-index: 3;
+}
+
 #flight-buttons {
     position: absolute;
     bottom: calc(30px + env(safe-area-inset-bottom, 0px));
