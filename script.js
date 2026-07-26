@@ -7632,12 +7632,11 @@ async function confirmSpawnLocation() {
     // lookup by ICAO), left null otherwise so no fake lights get drawn.
     _activeRunway = null;
 
-    // The flat 5 km ground-collision disc (and, critically, the distance
-    // gate updateCesiumCamera uses EVERY FRAME to decide whether groundHeight
-    // should be the real field elevation or fall back to sea level) gets
-    // anchored below, AFTER lat/lng are finalized to the actual resolved
-    // spawn point — see the comment right before that assignment for why.
+    // Reset the flat 5 km ground-collision disc for this spawn — re-anchored
+    // below to the airport's own centre/elevation when one is known, left
+    // null otherwise (free map click) so ground collision is simply off.
     const dbCentreElevM = ap.elev != null ? ap.elev * 0.3048 : 0;
+    _activeAirportCenter = (ap.icao && ap.icao !== '—') ? { lat: ap.lat, lng: ap.lng, elevM: dbCentreElevM } : null;
 
     if (isPlaneType(state.vehicle) && rwyVal) {
         try {
@@ -7688,52 +7687,50 @@ async function confirmSpawnLocation() {
         }
     }
 
-    // ── Anchor the ground-reference disc to the ACTUAL spawn point ─────────
-    // Previously this used ap.lat/ap.lng — the airport's database reference
-    // point — which can easily sit more than the disc's 5 km radius away
-    // from where the aircraft actually spawns: a runway threshold on a
-    // large field, or (worst case) an 8 nm final approach point, which is
-    // ALWAYS ~14.8 km out and therefore always outside a 5 km disc no
-    // matter what. Every frame, updateCesiumCamera checks the distance
-    // from the vehicle to this exact point/radius to decide whether
-    // groundHeight should be the real sampled field elevation or fall back
-    // to sea level (0 m) — so an airport-centre anchor meant the "correct"
-    // elevation we sample below was frequently discarded the instant the
-    // game loop started, snapping the plane/camera to sea level. Anchoring
-    // to lat/lng (the resolved spawn point itself) instead means the
-    // vehicle starts life exactly at the disc's centre, so this distance
-    // gate can never spuriously exclude it right out of spawn.
-    _activeAirportCenter = (ap.icao && ap.icao !== '—') ? { lat: lat, lng: lng, elevM: dbCentreElevM } : null;
-
     // ── Wait for the REAL terrain provider (not the flat Ellipsoid
-    // placeholder) before placing anything ─────────────────────────────────
+    // placeholder) before sampling anything ────────────────────────────────
     // tryEnableWorldTerrain() swaps cesiumViewer.terrainProvider from the
     // flat placeholder to real WorldTerrain asynchronously at page load,
-    // completely independent of the spawn flow. Capped at 6s so a missing/
-    // invalid Ion token can't hang the spawn screen forever.
+    // completely independent of the spawn flow. Spawning before that swap
+    // finishes was the actual cause of ending up "inside the sphere" —
+    // every height sample and the camera placement below would happen
+    // against flat ground at ~0m, and then real (often much higher)
+    // terrain would phase in underneath a moment later, leaving the
+    // camera buried inside it. Capped at 6s so a missing/invalid Ion
+    // token can't hang the spawn screen forever — falls through to
+    // whatever terrain is currently active (flat, worst case) if hit.
     if (_worldTerrainReadyPromise && settings.mapStyle === 'cesium') {
         setLoadingText('Loading real terrain…');
         await Promise.race([_worldTerrainReadyPromise, new Promise(r => setTimeout(r, 6000))]);
         if (gen !== _spawnGen) return; // player cancelled/respawned elsewhere while we were waiting
     }
 
-    // ── Place immediately using the OurAirports DB elevation as an
-    // approximation ─────────────────────────────────────────────────────────
-    // Waiting for a precise sampleHeightMostDetailed() reading before ever
-    // showing anything was the source of most of the remaining spawn bugs:
-    // it's slow, it depends on tile-loading timing that's hard to pin down
-    // reliably, and — as seen — even a "settled" sample could still be
-    // measuring the wrong spot or an unsettled mesh. The OurAirports
-    // `elev` field (per-runway-threshold, or the airport's own field
-    // elevation) is usually accurate to a few metres and is available
-    // INSTANTLY, no waiting on anything. So: use it to place everything
-    // right away, reveal the game quickly, and separately kick off a
-    // precise real-terrain sample in the background (see below) that
-    // silently corrects the height once/if it resolves — the plane and
-    // camera will just settle those last few metres once it's ready,
-    // instead of everyone staring at a loading screen for it up front.
+    // ── 0. Approximate elevation from OurAirports data FIRST — instantly,
+    // synchronously, no waiting on tiles/terrain at all ─────────────────────
+    // This is the actual database figure for this exact spawn point (runway
+    // threshold elevation, or the airport's field elevation), already
+    // resolved above along with lat/lng. Everything below — state, the
+    // ground-collision disc, the camera — gets placed with this number
+    // immediately, so spawn is never gated on how fast tiles happen to
+    // stream in. It's an approximation (OurAirports data can be a few
+    // metres off, or stale), but it's *instantly available* and anchored to
+    // the correct spot, which is what actually matters for not feeling
+    // broken. The precise real-terrain sample still happens — see step 4b
+    // — just afterward, in the background, silently nudging things onto the
+    // exact real height once it resolves instead of blocking on it first.
     const approxElevM = elev != null ? elev * 0.3048 : 0;
-    _activeAirportCenter = (ap.icao && ap.icao !== '—') ? { lat: lat, lng: lng, elevM: approxElevM } : null;
+
+    // ── Anchor the ground-reference disc to the ACTUAL spawn point ─────────
+    // Anchored to lat/lng (the resolved spawn point itself: runway
+    // threshold, 8 nm final-approach point, or airport centre) rather than
+    // ap.lat/ap.lng (the airport's database reference point), which can
+    // easily sit more than the disc's 5 km radius away from where the
+    // aircraft actually spawns — an 8 nm final approach is ALWAYS ~14.8 km
+    // out, so an airport-centre anchor meant updateCesiumCamera's
+    // every-frame distance gate excluded the vehicle from its own ground
+    // reference right out of spawn, snapping it to sea level the instant
+    // the game loop started.
+    _activeAirportCenter = (ap.icao && ap.icao !== '—') ? { lat, lng, elevM: approxElevM } : null;
 
     // ── 1. Apply selected spawn position to game state ─────────────────────
     state.lat     = lat;
@@ -7744,14 +7741,13 @@ async function confirmSpawnLocation() {
 
     // For plane: apply elevation + operation-specific state
     if (isPlaneType(state.vehicle)) {
-        const elevM = approxElevM;
         if (rwyVal && !isTakeoff) {
             // Landing: start at 2500 ft AGL on final approach, at approach speed
             // (each aircraft gets its own realistic approach speed: the A320
             // flies a ~150 kt final approach.
             // flies a ~70 kt final).
             const approachKt = 150;
-            flight.groundRef = elevM;
+            flight.groundRef = approxElevM;
             flight.alt       = 2500; // ft AGL
             flight.speed     = approachKt;
             flight.throttle  = 50;
@@ -7760,7 +7756,7 @@ async function confirmSpawnLocation() {
             state.speed      = approachKt * 1.852; // sync state.speed (km/h) for display
         } else if (elev != null) {
             // Takeoff or airport centre: on the runway
-            flight.groundRef = elevM;
+            flight.groundRef = approxElevM;
             flight.alt       = 5;    // 5 ft AGL — sitting on runway
             flight.speed     = 0;
             flight.throttle  = 0;
@@ -7778,8 +7774,7 @@ async function confirmSpawnLocation() {
     }
 
     // ── 3. Point the Cesium camera at the (approximate-for-now) spawn
-    // altitude, high enough that a slightly-off DB elevation still can't
-    // put it underground while tiles stream in ────────────────────────────
+    // location/altitude ─────────────────────────────────────────────────────
     if (cesiumViewer) {
         try {
             let camAlt, camPitch;
@@ -7806,9 +7801,10 @@ async function confirmSpawnLocation() {
 
     // ── 4. Wait (briefly) for the visible terrain/tiles under the camera to
     // load — just enough that the reveal doesn't show empty/placeholder
-    // ground, NOT a precision elevation wait. Capped much shorter than
-    // before (3s) since we're no longer gating correctness on this, only
-    // visual polish.
+    // ground. This is now purely visual polish, NOT a precision-elevation
+    // gate (that's why it's capped much shorter than before): correctness
+    // no longer depends on how long this takes, since state/disc/camera
+    // are already placed at a real, database-sourced height above.
     setLoadingText('Loading terrain tiles…');
     if (cesiumViewer) {
         const tileWaitStart = performance.now();
@@ -7822,15 +7818,17 @@ async function confirmSpawnLocation() {
     }
 
     // ── 4b. Kick off the PRECISE real-terrain sample in the background —
-    // deliberately NOT awaited here. The game reveals with the DB
-    // approximation above; whenever this resolves (usually well under a
-    // second, occasionally a couple more on a cold cache), it silently
-    // corrects _activeAirportCenter.elevM / flight.groundRef if the real
-    // value differs meaningfully. Since updateCesiumCamera reads both of
-    // those fresh every frame, the plane/camera just settle onto the
-    // precise height on their own — no manual camera repositioning needed,
-    // and nothing here blocks the loading screen.
-    (async (thisGen, spawnLat, spawnLng, wasPlane, wasApproach) => {
+    // deliberately NOT awaited here ──────────────────────────────────────────
+    // The game reveals with the DB approximation from step 0. Whenever this
+    // resolves (usually well under a second; occasionally a couple more on
+    // a cold tile cache), it silently corrects _activeAirportCenter.elevM
+    // and flight.groundRef if the real value differs meaningfully.
+    // updateCesiumCamera reads both of those fresh every single frame (see
+    // its groundHeight/anchorHeight computation), so the plane and camera
+    // just quietly settle onto the precise height on their own the moment
+    // this resolves — no manual re-placement needed, and nothing here can
+    // block or delay the reveal.
+    (async (thisGen, spawnLat, spawnLng, wasPlane) => {
         try {
             const preciseElevM = await Promise.race([
                 _sampleRealGroundElevation(spawnLat, spawnLng),
@@ -7848,8 +7846,7 @@ async function confirmSpawnLocation() {
         } catch (e) {
             console.warn('[Spawn] Background precise elevation sample failed:', e);
         }
-    })(gen, lat, lng, isPlaneType(state.vehicle), rwyVal && !isTakeoff);
-
+    })(gen, lat, lng, isPlaneType(state.vehicle));
     // ── 5. Enforce a minimum 5-second loading screen ────────────────────────
     // Elevation sampling + tile loading above are often fast (cached
     // airport, nearby tiles already resident) — but revealing the moment
