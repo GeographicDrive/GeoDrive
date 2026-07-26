@@ -494,6 +494,16 @@ button.danger { background: var(--danger); }
     box-shadow: 0 0 3px rgba(255,180,0,0.9);
     pointer-events: none;
     z-index: 3;
+    transition: background 0.15s ease, box-shadow 0.15s ease;
+}
+/* Autotrim is actively driving the stabilizer right now (as opposed to
+   idle, or the pilot manually holding the wheel) — the pointer glows cyan
+   instead of amber so the autotrim system is visibly "doing something" in
+   real time, not just a silently-changing number. Toggled every frame in
+   renderTrimWheel() from flight.thsAutotrimActive. */
+#trim-wheel-viewport.trim-autotrim-active #trim-wheel-pointer {
+    background: #22d3ee;
+    box-shadow: 0 0 6px rgba(34,211,238,0.95), 0 0 2px rgba(34,211,238,0.9);
 }
 
 #flight-buttons {

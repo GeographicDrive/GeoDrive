@@ -2200,6 +2200,8 @@ document.getElementById('vehicle-select').addEventListener('change', e => {
         flight.gearDown = true; flight.brakeActive = false; flight.reverseActive = false; flight.flapsDown = false;
         flight.groundRef = null;
         flight.rudderDeflection = 0;
+        flight.ths = 0;
+        trimWheel.dragging = false;
         flightInput.pitch = 0; flightInput.roll = 0; flightInput.yaw = 0;
         tillerInput = 0;
         ensureFlightSim(true); // reseed the 6-DOF sim at the new position/attitude
@@ -3552,6 +3554,11 @@ function updateThsTrim(dt, delta_e_rad) {
     const maxStep = THS_MAX_RATE * dt;
     const step = Math.max(-maxStep, Math.min(maxStep, target - flight.ths));
     flight.ths = Math.max(THS_MIN, Math.min(THS_MAX, flight.ths + step));
+
+    // Exposed purely so the wheel widget can visibly show "autotrim is
+    // actively driving the stabilizer right now" (a small color change on
+    // the pointer) vs. idle/manually-held — see renderTrimWheel().
+    flight.thsAutotrimActive = !trimWheel.dragging && Math.abs(target - flight.ths) > 0.02;
 }
 const flightInput = { pitch: 0, roll: 0, yaw: 0 };
 let flightJoystickActive = false;
@@ -3915,29 +3922,64 @@ function setupTrimWheel(viewportId, cylinderId) {
 setupTrimWheel('trim-wheel-viewport', 'trim-wheel-cylinder');
 
 /**
+ * alignTrimFloorWithThrottle — measures the ACTUAL on-screen bottom edge
+ * of #throttle-quadrant (the "throttle floor") and the current bottom
+ * edge of #trim-wheel-viewport (the "trim floor"), then shifts the whole
+ * trim column by exactly the difference so the two floors sit on the
+ * same line. Done by measurement (not hard-coded offsets) so it stays
+ * correct across the responsive breakpoints/media queries that resize
+ * the throttle quadrant, without needing separate magic numbers per
+ * breakpoint.
+ */
+function alignTrimFloorWithThrottle() {
+    const column = document.getElementById('trim-wheel-column');
+    const viewport = document.getElementById('trim-wheel-viewport');
+    const quadrant = document.getElementById('throttle-quadrant');
+    if (!column || !viewport || !quadrant) return;
+    // Undo any previous shift before measuring, so repeated calls converge
+    // instead of compounding.
+    column.style.transform = '';
+    const qBottom = quadrant.getBoundingClientRect().bottom;
+    const vBottom = viewport.getBoundingClientRect().bottom;
+    const shift = qBottom - vBottom;
+    if (Math.abs(shift) > 0.5) column.style.transform = `translateY(${shift}px)`;
+}
+
+/**
  * renderTrimWheel — every frame, positions the cylinder so the stripe
  * matching the current flight.ths sits centered under the fixed pointer
- * line, and updates the numeric readout. Runs on its own rAF loop (rather
- * than piggy-backing on updateFlight) so the wheel keeps rendering smoothly
- * even independent of physics-tick timing, same as the rest of the UI.
+ * line, updates the numeric readout, keeps the trim assembly's floor
+ * aligned with the throttle's, and lights up the pointer while autotrim
+ * is actively driving the wheel (vs. idle or hand-held) so the autotrim
+ * system is visibly doing something in real time, not just a number
+ * changing off-screen. Runs on its own rAF loop (rather than piggy-
+ * backing on updateFlight) so the wheel keeps rendering smoothly even
+ * independent of physics-tick timing, same as the rest of the UI.
  */
 function renderTrimWheel() {
     const cylinder = document.getElementById('trim-wheel-cylinder');
     const viewport = document.getElementById('trim-wheel-viewport');
     const valEl = document.getElementById('trim-wheel-val');
     if (cylinder && viewport) {
+        // flight.ths is the single source of truth here — the cylinder's
+        // transform is derived from it fresh every frame, so the visual
+        // wheel position can never drift out of sync with the real value,
+        // whether it moved via manual drag or autotrim.
         const turns = (flight.ths - THS_MIN) / THS_RANGE * 12; // 0..12
         const offsetPx = turns * TRIM_PX_PER_TURN;
         const centered = offsetPx - viewport.clientHeight / 2;
         cylinder.style.transform = `translateY(${-centered}px)`;
+        viewport.classList.toggle('trim-autotrim-active', !!flight.thsAutotrimActive);
     }
     if (valEl) {
         const arrow = flight.ths >= 0 ? '▲UP' : '▼DN';
         valEl.textContent = `${arrow} ${Math.abs(flight.ths).toFixed(1)}°`;
     }
+    alignTrimFloorWithThrottle();
     requestAnimationFrame(renderTrimWheel);
 }
 requestAnimationFrame(renderTrimWheel);
+window.addEventListener('resize', alignTrimFloorWithThrottle);
 
 /**
  * setupFlightTiller — real-aircraft-style tiller knob (see tiller.png).
@@ -8084,8 +8126,18 @@ const A320_SOUNDS = {
 };
 
 const a320Audio = {
-    normalCh: new Audio(),   // altitude callouts / V1 / retard — no overlap with itself
-    warnCh: new Audio(),     // GPWS warnings — highest priority, can interrupt
+    // Non-warning callouts (altitude gates, V1, retard) are QUEUED — each
+    // one always plays start-to-finish, in the order it was triggered,
+    // never skipped and never cut off, even if several fire in the same
+    // frame (e.g. a fast descent crossing 50/40/30/20/10 almost at once).
+    normalQueue: [],
+    normalPlaying: false,
+    // Warnings (GPWS/stall/etc.) get their own fresh Audio() instance every
+    // time and are never blocked by, and never cancel, anything else — they
+    // freely overlap the normal queue AND each other, matching how a real
+    // EGPWS lets an urgent warning talk over a routine callout instead of
+    // fighting it for a single channel.
+    warnPool: [],
     playedAlts: new Set(),   // altitude gates already called out on this approach
     v1Played: false,
     prevAgl: null,
@@ -8097,20 +8149,61 @@ const a320Audio = {
     clock: 0
 };
 
+/**
+ * playA320 — plays a callout/warning file WITHOUT ever interrupting,
+ * cancelling, or cutting off anything already sounding.
+ *   - warn=true  (GPWS/stall/etc.): fire-and-forget on a brand new Audio()
+ *     instance, tracked in warnPool purely so it can be cleaned up when
+ *     done. Freely overlaps everything else.
+ *   - warn=false (altitude callouts, V1, retard-as-non-warning callers):
+ *     pushed onto normalQueue and drained one at a time by
+ *     processA320NormalQueue(), so a burst of calls in a single frame (or
+ *     across frames while a prior one is still playing) is guaranteed to
+ *     be heard in full, in order, rather than the old behaviour of
+ *     silently dropping any callout that arrived while the shared channel
+ *     was busy.
+ */
 function playA320(key, warn) {
     const file = A320_SOUNDS[key];
     if (!file) return;
-    const ch = warn ? a320Audio.warnCh : a320Audio.normalCh;
-    // Normal (non-warning) callouts never overlap themselves — let the
-    // current one finish, exactly like the real EGPWS/callout voice, which
-    // never talks over itself. Warnings are allowed to retrigger/interrupt.
-    if (!warn && !ch.paused && !ch.ended) return;
-    try {
-        ch.src = A320_AUDIO_PATH + file;
-        ch.currentTime = 0;
-        ch.volume = warn ? 1.0 : 0.9;
-        ch.play().catch(() => {});
-    } catch (e) { /* audio unavailable — ignore */ }
+    if (warn) {
+        const audio = new Audio(A320_AUDIO_PATH + file);
+        audio.volume = 1.0;
+        a320Audio.warnPool.push(audio);
+        const cleanup = () => {
+            const i = a320Audio.warnPool.indexOf(audio);
+            if (i !== -1) a320Audio.warnPool.splice(i, 1);
+        };
+        audio.addEventListener('ended', cleanup);
+        audio.addEventListener('error', cleanup);
+        audio.play().catch(cleanup);
+    } else {
+        a320Audio.normalQueue.push(file);
+        processA320NormalQueue();
+    }
+}
+
+/**
+ * processA320NormalQueue — drains a320Audio.normalQueue one file at a
+ * time. Only ever one "normal" callout audibly playing at once (so e.g.
+ * "50" and "40" aren't garbled on top of each other), but nothing is ever
+ * skipped: each queued file waits its turn and gets to finish, so a rapid
+ * "50 -> 40 -> 30 -> 20 -> 10 -> 5" descent is heard in full, in order.
+ */
+function processA320NormalQueue() {
+    if (a320Audio.normalPlaying) return;
+    const file = a320Audio.normalQueue.shift();
+    if (!file) return;
+    a320Audio.normalPlaying = true;
+    const audio = new Audio(A320_AUDIO_PATH + file);
+    audio.volume = 0.9;
+    const advance = () => {
+        a320Audio.normalPlaying = false;
+        processA320NormalQueue();
+    };
+    audio.addEventListener('ended', advance);
+    audio.addEventListener('error', advance); // a missing/broken file can't jam the queue
+    audio.play().catch(advance);
 }
 
 function resetA320Approach() {
